@@ -31,10 +31,11 @@ pub struct ExternalStateMutation {
     #[bilrost(2)]
     pub version: Option<String>,
     // flexbuffers only supports string-keyed maps :-( --> so we store it as vector of kv pairs
-    #[serde_as(as = "serde_with::Seq<(_, _)>")]
+    // None = clear all state atomically (CLR); Some = replace with these pairs (per-key DEL/ASN).
+    #[serde_as(as = "Option<serde_with::Seq<(_, _)>>")]
     #[bilrost(3)]
     #[debug("<hidden>")]
-    pub state: HashMap<Bytes, Bytes>,
+    pub state: Option<HashMap<Bytes, Bytes>>,
 }
 
 /// # StateMutationVersion

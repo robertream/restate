@@ -199,7 +199,7 @@ fn generate_patch_state(rng: &mut StdRng, spec: &WorkloadSpec) -> Envelope<Raw> 
         commands::PatchStateCommand::from(ExternalStateMutation {
             service_id,
             version: None,
-            state,
+            state: Some(state),
         }),
     )
     .into_raw()

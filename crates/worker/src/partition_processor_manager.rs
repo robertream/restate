@@ -48,6 +48,7 @@ use restate_core::{
 };
 use restate_core::{RuntimeTaskHandle, TaskCenter};
 use restate_ingestion_client::IngestionClient;
+use restate_ingress_http::StateRouter;
 use restate_metadata_server::{MetadataStoreClient, ReadModifyWriteError};
 use restate_metadata_store::{ReadWriteError, RetryError, retry_on_retryable_error};
 use restate_partition_store::PartitionStoreManager;
@@ -133,6 +134,7 @@ pub struct PartitionProcessorManager<T> {
     invoker_capacity: InvokerCapacity,
 
     ingestion_client: IngestionClient<T, Envelope>,
+    state_router: StateRouter,
 
     /// Built in `new`; the polling task is spawned at the start of `run`.
     rule_book_cache_task: Option<RuleBookCache>,
@@ -210,6 +212,7 @@ where
         bifrost: Bifrost,
         snapshot_repository: Option<SnapshotRepository>,
         ingestion_client: IngestionClient<T, Envelope>,
+        state_router: StateRouter,
     ) -> Self {
         let config = updateable_config.pinned();
         let ppm_svc_rx = router_builder.register_service(BackPressureMode::Lossy);
@@ -268,6 +271,7 @@ where
             pending_snapshot_status_refreshes: HashSet::default(),
             snapshot_export_tasks: FuturesUnordered::default(),
             snapshot_repository,
+            state_router,
             fast_forward_on_startup: HashMap::default(),
             partition_table: Metadata::with_current(|m| m.updateable_partition_table()),
             wait_for_partition_table_update: false,
@@ -1385,6 +1389,7 @@ where
             self.ingestion_client.clone(),
             self.leader_handles_registry.clone(),
             self.rule_book_cache.clone(),
+            self.state_router.clone(),
         );
 
         self.asynchronous_operations
@@ -1548,6 +1553,7 @@ mod tests {
     use restate_core::partitions::PartitionRouting;
     use restate_core::{TaskCenter, TaskKind, TestCoreEnvBuilder};
     use restate_ingestion_client::{IngestionClient, SessionOptions};
+    use restate_ingress_http::StateRouter;
     use restate_partition_store::PartitionStoreManager;
     use restate_rocksdb::RocksDbManager;
     use restate_types::config::Configuration;
@@ -1615,6 +1621,7 @@ mod tests {
             bifrost,
             None,
             ingestion_client,
+            StateRouter::default(),
         );
 
         // only needed for setting up the metadata

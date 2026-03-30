@@ -13,14 +13,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, instrument, warn};
 
 use restate_bifrost::Bifrost;
 use restate_core::network::{ShardSender, TransportConnect};
-use restate_core::{RuntimeTaskHandle, TaskCenter, TaskKind, cancellation_token};
+use restate_core::{RuntimeTaskHandle, TaskCenter, TaskKind, cancellation_token, cancellation_watcher};
 use restate_ingestion_client::IngestionClient;
-use restate_partition_store::PartitionStoreManager;
+use restate_ingress_http::StateRouter;
+use restate_partition_store::{PartitionStoreManager, SubscriptionRequest};
 use restate_platform::prelude::ReString;
 use restate_types::cluster::cluster_state::PartitionProcessorStatus;
 use restate_types::logs::Lsn;
@@ -46,6 +47,7 @@ pub struct SpawnPartitionProcessorTask<T> {
     ingestion_client: IngestionClient<T, Envelope>,
     leader_handles_registry: PartitionLeaderHandlesRegistry,
     rule_book_cache: RuleBookCacheHandle,
+    state_router: StateRouter,
 }
 
 impl<T> SpawnPartitionProcessorTask<T>
@@ -64,6 +66,7 @@ where
         ingestion_client: IngestionClient<T, Envelope>,
         leader_handles_registry: PartitionLeaderHandlesRegistry,
         rule_book_cache: RuleBookCacheHandle,
+        state_router: StateRouter,
     ) -> Self {
         Self {
             task_name,
@@ -76,6 +79,7 @@ where
             ingestion_client,
             leader_handles_registry,
             rule_book_cache,
+            state_router,
         }
     }
 
@@ -105,6 +109,7 @@ where
             ingestion_client,
             leader_handles_registry,
             rule_book_cache,
+            state_router,
         } = self;
 
         let (control_tx, control_rx) = watch::channel(TargetLeaderState::Follower);
@@ -234,6 +239,75 @@ where
                         None
                     };
 
+                    // Set up state routing for SSE state change events
+                    if let Some(mut state_change_rx) = partition_store_manager
+                        .take_state_change_receiver(partition.partition_id)
+                    {
+                        let (cmd_tx, mut cmd_rx) = mpsc::channel::<SubscriptionRequest>(64);
+                        let mut store = partition_store.clone();
+
+                        let sub_ok = TaskCenter::spawn_child(
+                            TaskKind::Ingress,
+                            "partition-subscription",
+                            async move {
+                                let mut shutdown = std::pin::pin!(cancellation_watcher());
+                                loop {
+                                    tokio::select! {
+                                        _ = &mut shutdown => return Ok(()),
+                                        cmd = cmd_rx.recv() => match cmd {
+                                            Some(cmd) => {
+                                                if let Err(e) = store.handle_watch_command(cmd).await {
+                                                    warn!("handle_watch_command failed: {e}");
+                                                }
+                                            }
+                                            None => return Ok(()),
+                                        },
+                                    }
+                                }
+                            },
+                        );
+                        if let Err(e) = sub_ok {
+                            warn!("failed to spawn partition-subscription task: {e}");
+                        } else {
+                            state_router.add_partition(partition.partition_id, cmd_tx).await;
+
+                            let partition_id = partition.partition_id;
+                            if let Err(e) = TaskCenter::spawn_child(
+                                TaskKind::Ingress,
+                                "partition-state-relay",
+                                {
+                                    let router = state_router.clone();
+                                    async move {
+                                        let mut shutdown = std::pin::pin!(cancellation_watcher());
+                                        let interval = StateRouter::timer_interval();
+                                        let mut timer = tokio::time::interval_at(
+                                            tokio::time::Instant::now() + interval,
+                                            interval,
+                                        );
+                                        loop {
+                                            tokio::select! {
+                                                _ = &mut shutdown => {
+                                                    router.on_partition_closed(partition_id).await;
+                                                    return Ok(());
+                                                }
+                                                event = state_change_rx.recv() => match event {
+                                                    Some(event) => router.handle_state_change(tokio::time::Instant::now(), event).await,
+                                                    None => {
+                                                        router.on_partition_closed(partition_id).await;
+                                                        return Ok(());
+                                                    }
+                                                },
+                                                _ = timer.tick() => router.on_timer(tokio::time::Instant::now()).await,
+                                            }
+                                        }
+                                    }
+                                },
+                            ) {
+                                warn!("failed to spawn partition-state-relay task: {e}");
+                            }
+                        }
+                    }
+
                     let run_result = async move {
                         let pp = pp_builder
                             .build(
@@ -249,12 +323,7 @@ where
                     .await;
 
                     // Cancel and join the one-time jc-orphan-cleanup task before this
-                    // runtime task returns. The partition store manager only drops or
-                    // re-imports this partition's column family on a *subsequent* open(),
-                    // which cannot run until this runtime task has fully completed (see
-                    // PartitionProcessorManager::await_runtime_task_result). Joining here
-                    // guarantees the cleanup can never write through a stale column-family
-                    // handle and poison the shared RocksDB instance (see #4838).
+                    // runtime task returns.
                     if let Some(cleanup_task) = cleanup_task {
                         let _ = cleanup_task.cancel_and_wait().await;
                     }

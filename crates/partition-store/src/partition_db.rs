@@ -16,10 +16,12 @@ use std::time::Duration;
 use bytes::BytesMut;
 use parking_lot::RwLock;
 use rocksdb::table_properties::TablePropertiesExt;
+use std::collections::HashSet;
+
 use rocksdb::{
     BoundColumnFamily, DBRawIteratorWithThreadMode, ExportImportFilesMetaData, ReadOptions,
 };
-use tokio::sync::{RwLock as AsyncRwLock, watch};
+use tokio::sync::{RwLock as AsyncRwLock, mpsc, watch};
 use tokio::time::Instant;
 use tracing::{debug, info, instrument, warn};
 
@@ -28,6 +30,7 @@ use restate_rocksdb::configuration::{CfConfigurator, DbConfigurator};
 use restate_rocksdb::{DbName, RocksDb, RocksError};
 use restate_storage_api::StorageError;
 use restate_types::config::Configuration;
+use restate_types::identifiers::ServiceId;
 use restate_types::logs::Lsn;
 use restate_types::partitions::{CfName, Partition};
 use restate_util_bytecount::ByteCount;
@@ -35,6 +38,7 @@ use restate_util_bytecount::ByteCount;
 use crate::durable_lsn_tracking::{AppliedLsnCollectorFactory, DurableLsnEventListener};
 use crate::keys::KeyKind;
 use crate::memory::MemoryBudget;
+use crate::partition_store::StateChangeEvent;
 use crate::scan::PhysicalScan;
 use crate::snapshots::LocalPartitionSnapshot;
 use crate::{DB_PREFIX_LENGTH, ScanMode, TableKind};
@@ -46,6 +50,8 @@ pub struct PartitionDb {
     meta: Arc<Partition>,
     durable_lsn: watch::Sender<Option<Lsn>>,
     archived_lsn: watch::Sender<Option<Lsn>>,
+    pub(crate) state_change_tx: mpsc::Sender<Arc<StateChangeEvent>>,
+    pub(crate) subscribed_keys: Arc<RwLock<HashSet<ServiceId>>>,
     // Note: Rust will drop the fields in the order they are declared in the struct.
     // It's crucial to keep the column family and the database in this exact order.
     cf: PartitionBoundCfHandle,
@@ -58,16 +64,20 @@ impl PartitionDb {
         archived_lsn: watch::Sender<Option<Lsn>>,
         rocksdb: Arc<RocksDb>,
         cf: Arc<BoundColumnFamily<'_>>,
-    ) -> Self {
-        Self {
+    ) -> (Self, mpsc::Receiver<Arc<StateChangeEvent>>) {
+        let (state_change_tx, state_change_rx) = mpsc::channel(STATE_CHANGE_CHANNEL_CAPACITY);
+        let db = Self {
             meta,
             durable_lsn: watch::Sender::new(None),
             archived_lsn,
+            state_change_tx,
+            subscribed_keys: Arc::new(RwLock::new(HashSet::new())),
             // SAFETY: the new BoundColumnFamily here just expanding lifetime to static,
             // it's safe to use here as long as rocksdb is dropped last.
             cf: unsafe { PartitionBoundCfHandle::new(cf) },
             rocksdb,
-        }
+        };
+        (db, state_change_rx)
     }
 
     pub fn partition(&self) -> &Arc<Partition> {
@@ -264,6 +274,10 @@ impl PartitionBoundCfHandle {
     }
 }
 
+/// Capacity of the per-partition state change channel. Large enough to buffer a burst of
+/// per-key mutations before the SSE listener task has a chance to drain it.
+const STATE_CHANGE_CHANNEL_CAPACITY: usize = 1024;
+
 pub(crate) struct PartitionCell {
     meta: Arc<Partition>,
     archived_lsn: watch::Sender<Option<Lsn>>,
@@ -299,24 +313,27 @@ impl PartitionCell {
         }
     }
 
+    /// Opens the column family if it exists, returning the state change receiver if opened.
     pub fn open_cf(
         &self,
         guard: &mut tokio::sync::RwLockWriteGuard<'_, State>,
         rocksdb: &Arc<RocksDb>,
-    ) {
+    ) -> Option<mpsc::Receiver<Arc<StateChangeEvent>>> {
         let cf_name = self.cf_name();
         match rocksdb.inner().cf_handle(cf_name.as_ref()) {
             Some(handle) => {
-                let db = PartitionDb::new(
+                let (db, rx) = PartitionDb::new(
                     self.meta.clone(),
                     self.archived_lsn.clone(),
                     rocksdb.clone(),
                     handle,
                 );
                 self.open_local_cf(guard, db);
+                Some(rx)
             }
             None => {
                 self.set_cf_missing(guard);
+                None
             }
         }
     }
@@ -327,7 +344,7 @@ impl PartitionCell {
         &self,
         guard: &mut tokio::sync::RwLockWriteGuard<'_, State>,
         rocksdb: Arc<RocksDb>,
-    ) -> Result<PartitionDb, RocksError> {
+    ) -> Result<(PartitionDb, mpsc::Receiver<Arc<StateChangeEvent>>), RocksError> {
         // Defensive: drop any stale CF that might exist in RocksDB despite the
         // PartitionCell state being CfMissing. The exact sequence of events that leads
         // to this inconsistency hasn't been fully established yet, but we suspect that it
@@ -341,14 +358,14 @@ impl PartitionCell {
             .inner()
             .cf_handle(cf_name.as_ref())
             .expect("cf must be open");
-        let db = PartitionDb::new(
+        let (db, rx) = PartitionDb::new(
             self.meta.clone(),
             self.archived_lsn.clone(),
             rocksdb.clone(),
             handle,
         );
         self.open_local_cf(guard, db.clone());
-        Ok(db)
+        Ok((db, rx))
     }
 
     // low-level importing a column family from a locally downloaded a snapshot
@@ -358,7 +375,7 @@ impl PartitionCell {
         guard: &mut tokio::sync::RwLockWriteGuard<'_, State>,
         snapshot: LocalPartitionSnapshot,
         rocksdb: Arc<RocksDb>,
-    ) -> Result<PartitionDb, RocksError> {
+    ) -> Result<(PartitionDb, mpsc::Receiver<Arc<StateChangeEvent>>), RocksError> {
         // Sanity check
         if snapshot.key_range.start() > self.meta.key_range.start()
             || snapshot.key_range.end() < self.meta.key_range.end()
@@ -393,7 +410,7 @@ impl PartitionCell {
         // Remove the remaining snapshot files in a non-blocking way.
         snapshot.base_dir.remove().await;
 
-        let db = PartitionDb::new(
+        let (db, rx) = PartitionDb::new(
             self.meta.clone(),
             self.archived_lsn.clone(),
             rocksdb.clone(),
@@ -404,7 +421,7 @@ impl PartitionCell {
         );
 
         self.open_local_cf(guard, db.clone());
-        Ok(db)
+        Ok((db, rx))
     }
 
     /// Drops the column family from RocksDB if it exists. This is a no-op if the CF

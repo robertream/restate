@@ -62,6 +62,23 @@ define_table_key!(
     )
 );
 
+/// Null-byte prefix — sorts before all printable SDK keys, unambiguously internal.
+const REVISION_KEY: &[u8] = b"\x00__revision";
+
+fn is_internal_key(state_key: &[u8]) -> bool {
+    state_key.starts_with(b"\x00")
+}
+
+#[inline]
+fn write_revision_key(service_id: &ServiceId) -> StateKey {
+    StateKey {
+        partition_key: service_id.partition_key(),
+        service_name: service_id.service_name.clone(),
+        service_key: service_id.key.clone(),
+        state_key: Bytes::from_static(REVISION_KEY),
+    }
+}
+
 #[inline]
 fn write_state_entry_key(service_id: &ServiceId, state_key: &Bytes) -> StateKey {
     StateKey {
@@ -81,6 +98,24 @@ fn user_state_key_from_slice(mut key: &[u8]) -> Result<Bytes> {
         return Ok(ScopedStateKey::deserialize_from(&mut key)?.state_key);
     }
     Ok(StateKey::deserialize_from(&mut key)?.state_key)
+}
+
+fn read_revision<S: StorageAccess>(storage: &mut S, service_id: &ServiceId) -> Result<u64> {
+    let key = write_revision_key(service_id);
+    storage.get_kv_raw(key, |_k, v| {
+        Ok(
+            v.and_then(|b| b.first_chunk::<8>().map(|arr| u64::from_be_bytes(*arr)))
+                .unwrap_or(0),
+        )
+    })
+}
+
+fn write_revision<S: StorageAccess>(
+    storage: &mut S,
+    service_id: &ServiceId,
+    rev: u64,
+) -> Result<()> {
+    storage.put_kv_raw(write_revision_key(service_id), rev.to_be_bytes())
 }
 
 /// Lazy iterator over state entries. Exposes [`peek_item`](Self::peek_item)
@@ -118,13 +153,19 @@ impl<DB: DBAccess> Iterator for StateEntryIter<'_, DB> {
     type Item = Result<(Bytes, Bytes)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (k, v) = match self.peek_item()? {
-            Ok(item) => item,
-            Err(e) => return Some(Err(e)),
-        };
-        let result = decode_user_state_key_value(k, v);
-        self.advance();
-        Some(result)
+        loop {
+            let (k, v) = match self.peek_item()? {
+                Ok(item) => item,
+                Err(e) => return Some(Err(e)),
+            };
+            let result = decode_user_state_key_value(k, v);
+            self.advance();
+            // Skip internal keys — don't expose them to callers.
+            match &result {
+                Ok((key, _)) if is_internal_key(key) => continue,
+                _ => return Some(result),
+            }
+        }
     }
 }
 
@@ -194,6 +235,7 @@ fn delete_user_state<S: StorageAccess>(
     }
 }
 
+/// Delete all user-owned state entries, skipping internal keys so the revision survives.
 fn delete_all_user_state<S: StorageAccess>(
     storage: &mut S,
     storage_version: StorageVersion,
@@ -215,7 +257,13 @@ fn delete_all_user_state<S: StorageAccess>(
         // That's why we need to iterate over the individual state entries.
         let keys = storage.for_each_key_value_in_place(
             TableScan::SinglePartitionKeyPrefix(service_id.partition_key(), prefix_key),
-            |k, _| TableScanIterationDecision::Emit(Ok(Bytes::copy_from_slice(k))),
+            |k, _| {
+                let state_key = user_state_key_from_slice(k);
+                match state_key {
+                    Ok(sk) if is_internal_key(&sk) => TableScanIterationDecision::Continue,
+                    _ => TableScanIterationDecision::Emit(Ok(Bytes::copy_from_slice(k))),
+                }
+            },
         )?;
 
         for k in keys {
@@ -230,7 +278,13 @@ fn delete_all_user_state<S: StorageAccess>(
 
         let keys = storage.for_each_key_value_in_place(
             TableScan::SinglePartitionKeyPrefix(service_id.partition_key(), prefix_key),
-            |k, _| TableScanIterationDecision::Emit(Ok(Bytes::copy_from_slice(k))),
+            |k, _| {
+                let state_key = user_state_key_from_slice(k);
+                match state_key {
+                    Ok(sk) if is_internal_key(&sk) => TableScanIterationDecision::Continue,
+                    _ => TableScanIterationDecision::Emit(Ok(Bytes::copy_from_slice(k))),
+                }
+            },
         )?;
 
         for k in keys {
@@ -345,6 +399,12 @@ impl ReadStateTable for PartitionStore {
         let iter = get_all_user_states_for_service(self, self.storage_version(), service_id)?;
         Ok(budgeted_state_stream(iter, budget))
     }
+
+    async fn get_state_object_revision(&mut self, service_id: &ServiceId) -> Result<Option<u64>> {
+        self.assert_partition_key(service_id)?;
+        let rev = read_revision(self, service_id)?;
+        Ok(if rev == 0 { None } else { Some(rev) })
+    }
 }
 
 impl ScanStateTable for PartitionStore {
@@ -374,6 +434,10 @@ impl ScanStateTable for PartitionStore {
                     move |(mut key, value)| {
                         let row_key = break_on_err(StateKey::deserialize_from(&mut key))?;
                         let (partition_key, service_name, service_key, state_key) = row_key.split();
+                        // Skip internal keys during full scans too.
+                        if is_internal_key(&state_key) {
+                            return std::ops::ControlFlow::Continue(());
+                        }
                         let service_id =
                             ServiceId::from_parts(partition_key, service_name, service_key);
                         f_unscoped.lock()((service_id, state_key, value)).map_break(Ok)
@@ -449,6 +513,12 @@ impl ReadStateTable for PartitionStoreTransaction<'_> {
         let iter = get_all_user_states_for_service(self, self.storage_version(), service_id)?;
         Ok(budgeted_state_stream(iter, budget))
     }
+
+    async fn get_state_object_revision(&mut self, service_id: &ServiceId) -> Result<Option<u64>> {
+        self.assert_partition_key(service_id)?;
+        let rev = read_revision(self, service_id)?;
+        Ok(if rev == 0 { None } else { Some(rev) })
+    }
 }
 
 impl WriteStateTable for PartitionStoreTransaction<'_> {
@@ -459,6 +529,11 @@ impl WriteStateTable for PartitionStoreTransaction<'_> {
         state_value: impl AsRef<[u8]>,
     ) -> Result<()> {
         self.assert_partition_key(service_id)?;
+        self.record_state_assign(
+            service_id.clone(),
+            Bytes::copy_from_slice(state_key.as_ref()),
+            Bytes::copy_from_slice(state_value.as_ref()),
+        );
         put_user_state(
             self,
             self.storage_version(),
@@ -470,12 +545,31 @@ impl WriteStateTable for PartitionStoreTransaction<'_> {
 
     fn delete_user_state(&mut self, service_id: &ServiceId, state_key: &Bytes) -> Result<()> {
         self.assert_partition_key(service_id)?;
-        delete_user_state(self, self.storage_version(), service_id, state_key)
+        delete_user_state(self, self.storage_version(), service_id, state_key)?;
+        self.record_state_delete(
+            service_id.clone(),
+            Bytes::copy_from_slice(state_key.as_ref()),
+        );
+        Ok(())
     }
 
     fn delete_all_user_state(&mut self, service_id: &ServiceId) -> Result<()> {
         self.assert_partition_key(service_id)?;
-        delete_all_user_state(self, self.storage_version(), service_id)
+        delete_all_user_state(self, self.storage_version(), service_id)?;
+        self.record_state_clear_all(service_id.clone());
+        Ok(())
+    }
+}
+
+impl PartitionStoreTransaction<'_> {
+    pub(crate) fn increment_state_object_revision(
+        &mut self,
+        service_id: &ServiceId,
+    ) -> Result<u64> {
+        self.assert_partition_key(service_id)?;
+        let new_revision = read_revision(self, service_id)?.saturating_add(1);
+        write_revision(self, service_id, new_revision)?;
+        Ok(new_revision)
     }
 }
 

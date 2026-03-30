@@ -1,0 +1,29 @@
+{
+  "name": "agent-swarm-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "services": "tsx services/app.ts",
+    "register": "curl -X POST http://localhost:9070/deployments -H 'content-type: application/json' -d '{\"uri\": \"http://localhost:9080\"}'",
+    "start-demo": "curl -X POST http://localhost:8180/AgentSwarm/demo-1/start/send -H 'content-type: application/json' -d '\"climate change economics\"'",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "pull-model": "node-llama-cpp pull --dir ./models \"hf:ggml-org/gemma-3-4b-it-GGUF:Q4_K_M\""
+  },
+  "dependencies": {
+    "@restatedev/restate-sdk": "^1.11.1",
+    "@vue/reactivity": "^3.5.13",
+    "dexie": "^4.4.1",
+    "node-llama-cpp": "^3.18.1",
+    "petite-vue": "^0.4.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^25.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.2.5"
+  }
+}

@@ -649,7 +649,7 @@ async fn mutate_state() -> anyhow::Result<()> {
             ExternalStateMutation {
                 service_id: keyed_service_id.clone(),
                 version: None,
-                state: first_state_mutation,
+                state: Some(first_state_mutation),
             },
         ))
         .await;
@@ -658,7 +658,7 @@ async fn mutate_state() -> anyhow::Result<()> {
             ExternalStateMutation {
                 service_id: keyed_service_id.clone(),
                 version: None,
-                state: second_state_mutation.clone(),
+                state: Some(second_state_mutation.clone()),
             },
         ))
         .await;

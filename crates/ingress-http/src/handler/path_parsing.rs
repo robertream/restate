@@ -232,6 +232,11 @@ impl ServiceRequestType {
     }
 }
 
+pub(crate) struct ObjectStateRequestType {
+    pub(crate) service: String,
+    pub(crate) key: String,
+}
+
 /// Parse the new ingress API verbs under `/restate/...`. The verb has already been
 /// consumed by `parse_path`. Supported shapes:
 ///   - `call/{service}/{handler}` or `call/{service}/{key}/{handler}`
@@ -371,6 +376,24 @@ where
                     "workflow" => Ok(RequestType::Workflow(
                         WorkflowRequestType::from_path_chunks(segments)?,
                     )),
+                    "objects" => {
+                        let service =
+                            segments.next().ok_or(HandlerError::NotFound)?.to_owned();
+                        let key = urlencoding::decode(
+                            segments.next().ok_or(HandlerError::NotFound)?,
+                        )
+                        .map_err(HandlerError::UrlDecodingError)?
+                        .into_owned();
+                        match segments.next().ok_or(HandlerError::NotFound)? {
+                            "state" if segments.next().is_none() => {
+                                Ok(RequestType::ObjectState(ObjectStateRequestType {
+                                    service,
+                                    key,
+                                }))
+                            }
+                            _ => Err(HandlerError::NotFound),
+                        }
+                    }
                     _ => parse_restate_api_verb(verb, segments, schema),
                 }
             }

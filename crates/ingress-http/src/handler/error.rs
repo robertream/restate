@@ -29,6 +29,10 @@ pub(crate) enum HandlerError {
     #[error("service '{0}' not found, make sure to register the service before calling it.")]
     ServiceNotFound(String),
     #[error(
+        "service '{0}' does not have state; only VirtualObject and Workflow services have state."
+    )]
+    ServiceHasNoState(String),
+    #[error(
         "the service '{0}' exists, but the handler '{1}' was not found, check that the handler exists in the latest registered service version."
     )]
     ServiceHandlerNotFound(String, String),
@@ -86,6 +90,8 @@ pub(crate) enum HandlerError {
     NotReady,
     #[error("method not allowed")]
     MethodNotAllowed,
+    #[error("not acceptable: this endpoint only supports 'Accept: {0}'")]
+    NotAcceptable(String),
     #[error(
         "cannot get output for the given invocation. You can get output only for invocations created with an idempotency key, or for workflow methods."
     )]
@@ -130,7 +136,7 @@ pub enum ErrorResponse {
 }
 
 impl HandlerError {
-    pub(crate) fn fill_builder<B: http_body::Body + Default + From<Bytes>>(
+    pub(crate) fn fill_builder<B: http_body::Body + From<Bytes>>(
         self,
         res_builder: http::response::Builder,
     ) -> Response<B> {
@@ -139,6 +145,7 @@ impl HandlerError {
             | HandlerError::ServiceNotFound(_)
             | HandlerError::ServiceHandlerNotFound(_, _)
             | HandlerError::InvocationNotFound => StatusCode::NOT_FOUND,
+            HandlerError::ServiceHasNoState(_) => StatusCode::BAD_REQUEST,
             HandlerError::BadServicePath
             | HandlerError::PrivateService
             | HandlerError::UrlDecodingError(_)
@@ -171,6 +178,7 @@ impl HandlerError {
             HandlerError::Body(_) => StatusCode::INTERNAL_SERVER_ERROR,
             HandlerError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             HandlerError::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
+            HandlerError::NotAcceptable(_) => StatusCode::NOT_ACCEPTABLE,
             HandlerError::NotImplemented => StatusCode::NOT_IMPLEMENTED,
             HandlerError::Invocation(e) => {
                 StatusCode::from_u16(e.code().into()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
@@ -196,7 +204,7 @@ impl HandlerError {
             .unwrap()
     }
 
-    pub(crate) fn into_response<B: http_body::Body + Default + From<Bytes>>(self) -> Response<B> {
+    pub(crate) fn into_response(self) -> Response<axum::body::Body> {
         self.fill_builder(http::response::Builder::new())
     }
 }

@@ -13,9 +13,11 @@ mod layers;
 mod metric_definitions;
 mod rpc_request_dispatcher;
 mod server;
+mod state_router;
 
 pub use rpc_request_dispatcher::InvocationClientRequestDispatcher;
 pub use server::{HyperServerIngress, IngressServerError};
+pub use state_router::StateRouter;
 
 use std::future::Future;
 use std::sync::Arc;

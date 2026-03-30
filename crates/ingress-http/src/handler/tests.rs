@@ -1189,7 +1189,7 @@ pub async fn handle_with_schemas_and_dispatcher<B: http_body::Body + Send + 'sta
     mut req: Request<B>,
     schemas: MockSchemas,
     dispatcher: MockRequestDispatcher,
-) -> Response<Full<Bytes>>
+) -> Response<axum::body::Body>
 where
     <B as http_body::Body>::Error: std::error::Error + Send + Sync + 'static,
     <B as http_body::Body>::Data: Send + Sync + 'static,
@@ -1200,7 +1200,8 @@ where
         .insert(ConnectInfo::new(SocketAddress::Anonymous));
     req.extensions_mut().insert(opentelemetry::Context::new());
 
-    let handler_fut = Handler::new(Live::from_value(schemas), Arc::new(dispatcher)).oneshot(req);
+    let handler_fut =
+        Handler::new(Live::from_value(schemas), Arc::new(dispatcher), None).oneshot(req);
 
     handler_fut.await.unwrap()
 }
@@ -1208,7 +1209,7 @@ where
 pub async fn handle<B: http_body::Body + Send + 'static>(
     req: Request<B>,
     mock_request_dispatcher: MockRequestDispatcher,
-) -> Response<Full<Bytes>>
+) -> Response<axum::body::Body>
 where
     <B as http_body::Body>::Error: std::error::Error + Send + Sync + 'static,
     <B as http_body::Body>::Data: Send + Sync + 'static,

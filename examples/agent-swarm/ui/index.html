@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Swarm — Live Graph Demo</title>
+  <style>
+    [v-cloak] { display: none; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', -apple-system, system-ui, sans-serif;
+      background: #0d1117; color: #c9d1d9;
+      min-height: 100vh; display: flex; flex-direction: column;
+    }
+
+    .top-bar { padding: 1rem 2rem 0; flex-shrink: 0; }
+    .header { text-align: center; margin-bottom: 1rem; }
+    .header h1 { font-size: 1.4rem; font-weight: 600; color: #e6edf3; letter-spacing: 1px; }
+    .header .subtitle { font-size: 0.8rem; color: #8b949e; margin-top: 0.2rem; }
+
+    .controls { text-align: center; margin-bottom: 1rem; }
+    .controls input {
+      background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+      color: #c9d1d9; padding: 0.5rem 1rem; font-size: 0.9rem; width: 300px; margin-right: 0.5rem;
+    }
+    .controls input::placeholder { color: #484f58; }
+    .controls button {
+      background: #238636; color: #fff; border: 1px solid #2ea043; border-radius: 6px;
+      padding: 0.5rem 1.2rem; font-size: 0.9rem; cursor: pointer; transition: background 200ms;
+    }
+    .controls button:hover { background: #2ea043; }
+
+    .status-bar { text-align: center; margin-bottom: 0.5rem; font-size: 0.8rem; color: #8b949e; }
+    .badge {
+      display: inline-block; padding: 0.2rem 0.6rem; border-radius: 12px;
+      font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.5px; margin-left: 0.5rem;
+    }
+
+    .main { flex: 1; display: flex; overflow: hidden; min-height: 0; }
+
+    /* Graph viewport */
+    .graph-viewport { flex: 1; overflow: auto; position: relative; }
+    .graph-canvas {
+      position: relative;
+      transform-origin: top left;
+      transition: transform 100ms ease;
+    }
+
+    /* SVG edge layer */
+    .graph-edges {
+      position: absolute; top: 0; left: 0;
+      pointer-events: none; overflow: visible;
+    }
+    .graph-edges line {
+      stroke: #30363d; stroke-width: 1;
+      transition: x1 300ms, y1 300ms, x2 300ms, y2 300ms;
+    }
+
+    /* Node card — fixed size, absolutely positioned */
+    .node {
+      position: absolute;
+      background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+      padding: 0.5rem 0.7rem; width: 156px; height: 90px;
+      text-align: center; overflow: hidden;
+      transition: left 300ms ease, top 300ms ease, border-color 300ms, box-shadow 300ms;
+      cursor: pointer; user-select: none;
+    }
+    .node:hover { border-color: #58a6ff; }
+    .node.selected { border-color: #58a6ff; box-shadow: 0 0 12px rgba(88,166,255,0.3); }
+    .node-label { font-size: 0.78rem; font-weight: 600; color: #e6edf3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .node-type {
+      font-size: 0.48rem; color: #484f58; text-transform: uppercase;
+      letter-spacing: 0.5px; margin-top: 0.05rem;
+    }
+    .node-status {
+      font-size: 0.6rem; margin-top: 0.2rem; padding: 0.1rem 0.35rem;
+      border-radius: 10px; display: inline-block; font-weight: 500;
+      transition: background 300ms, color 300ms;
+    }
+    .node-message {
+      font-size: 0.5rem; color: #8b949e; margin-top: 0.2rem;
+      font-style: italic; line-height: 1.15;
+      overflow: hidden; text-overflow: ellipsis;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    }
+
+    /* Status colors */
+    .st-planning, .st-spawned { background: #1f3a5f; color: #58a6ff; }
+    .st-delegating { background: #0d3b3b; color: #5eead4; }
+    .st-searching, .st-running { background: #3d2e00; color: #e3b341; }
+    .st-synthesizing { background: #2d1f4e; color: #bc8cff; }
+    .st-complete { background: #0d3117; color: #3fb950; }
+
+    .glow-spawned { border-color: #1f6feb; }
+    .glow-searching, .glow-running, .glow-planning {
+      border-color: #9e6a03; box-shadow: 0 0 6px rgba(158,106,3,0.2);
+    }
+    .glow-delegating { border-color: #14b8a6; box-shadow: 0 0 6px rgba(20,184,166,0.2); }
+    .glow-synthesizing { border-color: #8957e5; box-shadow: 0 0 6px rgba(137,87,229,0.2); }
+    .glow-complete { border-color: #238636; }
+
+    .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+    .dot-on { background: #3fb950; }
+    .dot-off { background: #f85149; }
+
+    /* Detail panel */
+    .detail-panel {
+      position: fixed;
+      background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+      overflow: hidden; z-index: 100;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      display: flex; flex-direction: column;
+    }
+    .detail-titlebar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.5rem 0.8rem;
+      background: #0d1117; border-bottom: 1px solid #21262d;
+      cursor: grab; user-select: none;
+    }
+    .detail-titlebar:active { cursor: grabbing; }
+    .detail-titlebar-label { font-size: 0.7rem; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px; }
+    .detail-close {
+      background: none; border: none; color: #484f58;
+      font-size: 1.2rem; cursor: pointer; padding: 0 0.3rem;
+    }
+    .detail-close:hover { color: #c9d1d9; }
+    .detail-body { overflow-y: auto; padding: 1.2rem; flex: 1; }
+    .detail-header { font-size: 1.1rem; font-weight: 600; color: #e6edf3; margin-bottom: 0.2rem; }
+    .detail-type { font-size: 0.7rem; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 0.8rem; }
+    .detail-status { font-size: 0.85rem; padding: 0.2rem 0.6rem; border-radius: 10px; display: inline-block; font-weight: 500; margin-bottom: 0.8rem; }
+    .detail-section { margin-bottom: 0.8rem; }
+    .detail-section-title { font-size: 0.65rem; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 0.3rem; }
+    .detail-message { font-size: 0.85rem; color: #8b949e; font-style: italic; line-height: 1.4; }
+    .detail-desc { font-size: 0.8rem; color: #8b949e; line-height: 1.4; }
+    .detail-stat {
+      display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px;
+      font-size: 0.75rem; color: #58a6ff; background: rgba(31,58,95,0.25);
+      margin-right: 0.4rem; margin-bottom: 0.3rem;
+    }
+    .detail-findings { list-style: none; padding: 0; }
+    .detail-findings li {
+      font-size: 0.8rem; color: #c9d1d9; line-height: 1.5;
+      padding: 0.4rem 0 0.4rem 1rem;
+      border-bottom: 1px solid #21262d; position: relative;
+    }
+    .detail-findings li:last-child { border-bottom: none; }
+    .detail-findings li::before {
+      content: ''; position: absolute; left: 0; top: 0.7rem;
+      width: 5px; height: 5px; border-radius: 50%; background: #58a6ff;
+    }
+
+    [class^="w-resize-"] { position: absolute; z-index: 10; }
+    [class^="w-resize-"]:hover { background: rgba(88,166,255,0.15); }
+    .w-resize-n { top: -5px; left: 0; width: 100%; height: 10px; cursor: n-resize; }
+    .w-resize-s { bottom: -5px; left: 0; width: 100%; height: 10px; cursor: s-resize; }
+    .w-resize-e { top: 0; right: -5px; width: 10px; height: 100%; cursor: e-resize; }
+    .w-resize-w { top: 0; left: -5px; width: 10px; height: 100%; cursor: w-resize; }
+    .w-resize-nw { top: -5px; left: -5px; width: 16px; height: 16px; cursor: nw-resize; }
+    .w-resize-ne { top: -5px; right: -5px; width: 16px; height: 16px; cursor: ne-resize; }
+    .w-resize-sw { bottom: -5px; left: -5px; width: 16px; height: 16px; cursor: sw-resize; }
+    .w-resize-se { bottom: -5px; right: -5px; width: 16px; height: 16px; cursor: se-resize; }
+
+    .empty { text-align: center; color: #484f58; padding: 4rem 2rem; font-size: 0.9rem; flex: 1; display: flex; align-items: center; justify-content: center; }
+
+    .zoom-controls { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); display: flex; gap: 0.3rem; margin-bottom: 0.5rem; }
+    .zoom-btn {
+      background: #161b22; border: 1px solid #30363d; border-radius: 4px;
+      color: #8b949e; font-size: 0.85rem; width: 28px; height: 28px;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+    }
+    .zoom-btn:hover { color: #c9d1d9; border-color: #484f58; }
+
+    /* Admin panel — fixed popup at bottom of viewport */
+    .admin-panel {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      z-index: 1000;
+      display: flex; flex-direction: column;
+      box-shadow: 0 -4px 20px rgba(0,0,0,0.5);
+      border-top: 1px solid #30363d;
+    }
+    .admin-resize-handle {
+      height: 6px; cursor: ns-resize; background: transparent;
+      position: relative; flex-shrink: 0;
+    }
+    .admin-resize-handle::after {
+      content: ''; position: absolute; left: 50%; top: 50%;
+      transform: translate(-50%, -50%);
+      width: 40px; height: 3px; border-radius: 2px;
+      background: #484f58; transition: background 0.15s;
+    }
+    .admin-resize-handle:hover::after { background: #8b949e; }
+    .admin-titlebar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.4rem 1rem; background: #0d1117;
+      font-size: 0.7rem; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .admin-toggle {
+      background: none; border: 1px solid #30363d; border-radius: 4px;
+      color: #8b949e; font-size: 0.65rem; padding: 0.15rem 0.5rem;
+      cursor: pointer;
+    }
+    .admin-toggle:hover { color: #c9d1d9; border-color: #484f58; }
+    .admin-iframe {
+      width: 100%; border: none; background: #161b22; flex: 1;
+    }
+    .admin-panel.resizing .admin-iframe { pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div id="app" v-cloak
+       v-scope="{ $query: 'climate change economics', $sel: null, $zoom: 0.85, $layout: { pos: {}, width: 0, height: 0 }, $showAdmin: false, $adminH: 350, $adminResizing: false, $adminStartY: 0, $adminStartH: 350 }"
+       v-using="Data({
+         swarm: Memory('/restate/objects/AgentSwarm/demo-1/state'),
+       })">
+  <div v-using="{ sf: swarm.frame({ size: 200 }) }">
+
+    <!-- Top bar -->
+    <div class="top-bar">
+      <div class="header">
+        <h1>AGENT SWARM</h1>
+        <div class="subtitle">
+          <span class="dot" :class="swarm.connected ? 'dot-on' : 'dot-off'"></span>
+          <span v-if="swarm.connected">Live — Restate SSE</span>
+          <span v-else>{{ swarm.status }}...</span>
+        </div>
+      </div>
+
+      <div class="controls">
+        <input v-model="$query" placeholder="Enter research query..."
+               @keyup.enter="fetch('/AgentSwarm/demo-1/start/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify($query) })" />
+        <button @click="fetch('/AgentSwarm/demo-1/start/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify($query) })">
+          Start Demo
+        </button>
+      </div>
+
+      <div v-if="sf.records.length > 0" class="status-bar">
+        Query: <strong>{{ sf.records[0][1].query }}</strong>
+        <span class="badge" :class="'st-' + sf.records[0][1].status">{{ sf.records[0][1].status }}</span>
+      </div>
+    </div>
+
+    <!-- Graph -->
+    <div class="main" v-if="sf.records.length > 0"
+         v-effect="Object.assign($layout, window.treeLayout(sf.records))">
+      <div class="graph-viewport">
+        <div class="graph-canvas"
+             :style="'width:' + $layout.width + 'px; height:' + $layout.height + 'px; transform: scale(' + $zoom + ')'">
+
+          <!-- SVG edges — filter records to only those with parents and positions -->
+          <svg class="graph-edges" :width="$layout.width" :height="$layout.height">
+            <line v-for="[key, node] in sf.records.filter(([k, n]) => n.parent && $layout.pos[k] && $layout.pos[n.parent])"
+                  :key="'e-' + key"
+                  :x1="$layout.pos[node.parent].cx"
+                  :y1="$layout.pos[node.parent].y + 90"
+                  :x2="$layout.pos[key].cx"
+                  :y2="$layout.pos[key].y" />
+          </svg>
+
+          <!-- Nodes — filter to those with positions -->
+          <div v-for="[key, node] in sf.records.filter(([k]) => $layout.pos[k])" :key="key"
+               class="node"
+               :class="['glow-' + node.status, { selected: $sel === key }]"
+               :style="'left:' + $layout.pos[key].x + 'px; top:' + $layout.pos[key].y + 'px'"
+               @click="$sel = key">
+            <div class="node-label">{{ node.label || key }}</div>
+            <div class="node-type">{{ node.type || (key === 'root' ? 'orchestrator' : 'agent') }}</div>
+            <div class="node-type" v-if="node.tool" style="color:#58a6ff">{{ node.tool }}</div>
+            <div class="node-type" v-if="node.budget" style="color:#484f58">{{ node.budgetUsed || 0 }}/{{ node.budget }} steps</div>
+            <div class="node-status" :class="'st-' + node.status">{{ node.status }}</div>
+            <div class="node-message" v-if="node.message">{{ node.message }}</div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Detail panel — reads live from sf.records so it updates in real-time -->
+      <div v-if="$sel && sf.records.find(([k]) => k === $sel)"
+           v-using="{ $window: Window({ x: window.innerWidth - 360, y: 120, width: 340, height: 480 }) }"
+           @vue:mounted="$window.mount($el)"
+           class="detail-panel">
+        <div class="detail-titlebar w-move">
+          <span class="detail-titlebar-label">Node Detail</span>
+          <button class="detail-close" @click="$sel = null">&times;</button>
+        </div>
+        <div v-for="[dk, d] in sf.records.filter(([k]) => k === $sel)" class="detail-body">
+          <div class="detail-header">{{ d.label || dk }}</div>
+          <div class="detail-type">{{ d.type || (dk === 'root' ? 'orchestrator' : 'agent') }}</div>
+          <div class="detail-status" :class="'st-' + d.status">{{ d.status }}</div>
+
+          <div class="detail-section" v-if="d.message">
+            <div class="detail-section-title">Activity</div>
+            <div class="detail-message">{{ d.message }}</div>
+          </div>
+          <div class="detail-section" v-if="d.desc">
+            <div class="detail-section-title">Description</div>
+            <div class="detail-desc">{{ d.desc }}</div>
+          </div>
+          <div class="detail-section" v-if="d.query">
+            <div class="detail-section-title">Query</div>
+            <div class="detail-desc">{{ d.query }}</div>
+          </div>
+          <div class="detail-section" v-if="d.resultCount || d.found || d.researchers || d.inputCount">
+            <div class="detail-section-title">Stats</div>
+            <span class="detail-stat" v-if="d.resultCount">{{ d.resultCount }} results</span>
+            <span class="detail-stat" v-if="d.found">{{ d.found }} found</span>
+            <span class="detail-stat" v-if="d.inputCount">{{ d.inputCount }} inputs</span>
+            <span class="detail-stat" v-if="d.researchers">{{ d.researchers }} agents</span>
+            <span class="detail-stat" v-if="d.sources">{{ d.sources }} sources</span>
+          </div>
+          <div class="detail-section" v-if="d.findings">
+            <div class="detail-section-title">Findings ({{ d.findings.length }})</div>
+            <ul class="detail-findings">
+              <li v-for="f in d.findings">{{ f }}</li>
+            </ul>
+          </div>
+          <div class="detail-section">
+            <div class="detail-section-title">Node ID</div>
+            <div class="detail-desc" style="font-family: monospace; font-size: 0.75rem; color: #484f58;">{{ dk }}</div>
+          </div>
+        </div>
+        <div class="w-resize-n"></div>
+        <div class="w-resize-s"></div>
+        <div class="w-resize-e"></div>
+        <div class="w-resize-w"></div>
+        <div class="w-resize-nw"></div>
+        <div class="w-resize-ne"></div>
+        <div class="w-resize-sw"></div>
+        <div class="w-resize-se"></div>
+      </div>
+    </div>
+
+    <!-- Empty state -->
+    <div v-if="sf.records.length === 0" class="empty">
+      <div>Enter a query and click <strong>Start Demo</strong> to watch the agent swarm build in real-time.</div>
+    </div>
+
+    <!-- Restate Admin Panel -->
+    <div class="admin-panel" :class="{ resizing: $adminResizing }"
+         :style="$showAdmin ? 'height:' + $adminH + 'px' : ''">
+      <div class="zoom-controls">
+        <button class="zoom-btn" @click="$zoom = Math.max(0.3, $zoom - 0.15)">-</button>
+        <button class="zoom-btn" @click="$zoom = 0.85">1:1</button>
+        <button class="zoom-btn" @click="$zoom = Math.min(2, $zoom + 0.15)">+</button>
+      </div>
+      <div v-if="$showAdmin" class="admin-resize-handle"
+           @mousedown.prevent="$adminResizing = true; $adminStartY = $event.clientY; $adminStartH = $adminH;
+             const onMove = e => { $adminH = Math.max(100, Math.min(window.innerHeight - 60, $adminStartH + ($adminStartY - e.clientY))); };
+             const onUp = () => { $adminResizing = false; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+             window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);">
+      </div>
+      <div class="admin-titlebar">
+        <span>Restate Admin</span>
+        <button class="admin-toggle" @click="$showAdmin = !$showAdmin">
+          {{ $showAdmin ? 'Hide' : 'Show' }}
+        </button>
+      </div>
+      <iframe v-if="$showAdmin" class="admin-iframe" src="http://localhost:9170/ui/invocations"></iframe>
+    </div>
+
+  </div>
+  </div>
+
+  <script type="module">
+    // Tree layout function — computes {x, y, cx, cy} for each node from flat records.
+    // Children are wrapped into rows of at most MAX_PER_ROW to keep the tree compact.
+    const NODE_W = 156;
+    const NODE_H = 90;
+    const GAP_X = 20;
+    const GAP_Y = 40;
+    const PAD = 40;
+    const MAX_PER_ROW = 3;
+
+    window.treeLayout = function(records) {
+      const pos = {};
+      if (records.length === 0) return { pos, width: 0, height: 0 };
+
+      // Build adjacency: parent → children[]
+      const childrenOf = {};
+      const nodeMap = {};
+      for (const [key, node] of records) {
+        nodeMap[key] = node;
+        const p = node.parent || null;
+        if (p) {
+          if (!childrenOf[p]) childrenOf[p] = [];
+          childrenOf[p].push(key);
+        }
+      }
+
+      // Find root (node with no parent, or key "root")
+      let rootKey = 'root';
+      if (!nodeMap[rootKey]) {
+        for (const [key, node] of records) {
+          if (!node.parent) { rootKey = key; break; }
+        }
+      }
+
+      // Chunk children into rows of MAX_PER_ROW
+      function chunkRows(children) {
+        const rows = [];
+        for (let i = 0; i < children.length; i += MAX_PER_ROW) {
+          rows.push(children.slice(i, i + MAX_PER_ROW));
+        }
+        return rows;
+      }
+
+      // Compute subtree size bottom-up: { w, h } includes all wrapped rows
+      const subtreeSize = {};
+      function computeSize(key) {
+        const children = childrenOf[key] || [];
+        if (children.length === 0) {
+          subtreeSize[key] = { w: NODE_W, h: NODE_H };
+          return subtreeSize[key];
+        }
+
+        // Compute child sizes first
+        for (const c of children) computeSize(c);
+
+        // Group into rows — each row's width is sum of child subtree widths + gaps
+        const rows = chunkRows(children);
+        let totalW = 0;
+        let totalH = 0;
+        for (const row of rows) {
+          let rowW = 0;
+          let rowH = 0;
+          for (const c of row) {
+            rowW += subtreeSize[c].w;
+            rowH = Math.max(rowH, subtreeSize[c].h);
+          }
+          rowW += (row.length - 1) * GAP_X;
+          totalW = Math.max(totalW, rowW);
+          totalH += rowH;
+        }
+        totalH += (rows.length - 1) * GAP_Y;
+        // Add space for parent node row + gap to first child row
+        const fullH = NODE_H + GAP_Y + totalH;
+        subtreeSize[key] = { w: Math.max(NODE_W, totalW), h: fullH };
+        return subtreeSize[key];
+      }
+      computeSize(rootKey);
+
+      // Assign positions top-down
+      let maxX = 0;
+      let maxY = 0;
+
+      function layout(key, x, y) {
+        // Center this node within its subtree width
+        const sw = subtreeSize[key]?.w || NODE_W;
+        const nx = x + (sw - NODE_W) / 2;
+        pos[key] = { x: nx, y, cx: nx + NODE_W / 2, cy: y + NODE_H / 2 };
+        if (nx + NODE_W > maxX) maxX = nx + NODE_W;
+        if (y + NODE_H > maxY) maxY = y + NODE_H;
+
+        const children = childrenOf[key] || [];
+        if (children.length === 0) return;
+
+        const rows = chunkRows(children);
+        let rowY = y + NODE_H + GAP_Y;
+        for (const row of rows) {
+          // Total width of this row's subtrees
+          let rowW = 0;
+          let rowH = 0;
+          for (const c of row) {
+            rowW += subtreeSize[c].w;
+            rowH = Math.max(rowH, subtreeSize[c].h);
+          }
+          rowW += (row.length - 1) * GAP_X;
+
+          // Center row within parent's subtree width
+          let childX = x + (sw - rowW) / 2;
+          for (const c of row) {
+            layout(c, childX, rowY);
+            childX += subtreeSize[c].w + GAP_X;
+          }
+          rowY += rowH + GAP_Y;
+        }
+      }
+
+      layout(rootKey, PAD, PAD);
+
+      return { pos, width: maxX + PAD, height: maxY + PAD };
+    };
+  </script>
+  <script type="module">
+    import 'data-graph/auto-init';
+  </script>
+</body>
+</html>

@@ -15,7 +15,7 @@ mod utils;
 
 pub use actions::{Action, ActionCollector};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::ops::{RangeBounds, RangeInclusive};
@@ -5396,15 +5396,27 @@ impl<S> StateMachineApplyContext<'_, S> {
             }
         }
 
-        for (key, _) in &all_user_states {
-            if !state.contains_key(key) {
-                self.storage.delete_user_state(service_id, key)?;
+        match state {
+            None => {
+                // null new_state: emit a single CLR event.
+                self.storage.delete_all_user_state(service_id)?;
             }
-        }
+            Some(new_state) => {
+                let existing: HashMap<&Bytes, &Bytes> =
+                    all_user_states.iter().map(|(k, v)| (k, v)).collect();
 
-        // overwrite existing key value pairs
-        for (key, value) in state {
-            self.storage.put_user_state(service_id, key, value)?;
+                for (key, _) in &all_user_states {
+                    if !new_state.contains_key(key) {
+                        self.storage.delete_user_state(service_id, key)?;
+                    }
+                }
+
+                for (key, value) in new_state.iter() {
+                    if existing.get(key).is_none_or(|&v| v != value) {
+                        self.storage.put_user_state(service_id, key, value)?;
+                    }
+                }
+            }
         }
 
         Ok(vqueue_table::Status::Succeeded)

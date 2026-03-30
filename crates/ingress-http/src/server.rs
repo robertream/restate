@@ -31,6 +31,7 @@ use tracing::{Span, debug, info, info_span, instrument};
 
 use restate_core::network::hyper_error_status;
 use restate_core::{TaskCenter, TaskKind, cancellation_watcher};
+use crate::state_router::StateRouter;
 use restate_types::config::IngressOptions;
 use restate_types::errors::GenericError;
 use restate_types::health::HealthStatus;
@@ -62,6 +63,7 @@ pub struct HyperServerIngress<Schemas, Dispatcher> {
     // Parameters to build the layers
     schemas: Live<Schemas>,
     dispatcher: Dispatcher,
+    state_router: Option<StateRouter>,
 
     health: HealthStatus<IngressStatus>,
 }
@@ -77,6 +79,7 @@ where
         dispatcher: Dispatcher,
         schemas: Live<Schemas>,
         health: HealthStatus<IngressStatus>,
+        state_router: Option<StateRouter>,
     ) -> HyperServerIngress<Schemas, Dispatcher> {
         crate::metric_definitions::describe_metrics();
         HyperServerIngress::new(
@@ -87,6 +90,7 @@ where
             schemas,
             dispatcher,
             health,
+            state_router,
         )
     }
 }
@@ -104,6 +108,7 @@ where
         schemas: Live<Schemas>,
         dispatcher: Dispatcher,
         health: HealthStatus<IngressStatus>,
+        state_router: Option<StateRouter>,
     ) -> Self {
         health.update(IngressStatus::StartingUp);
 
@@ -114,6 +119,7 @@ where
             http2_max_concurrent_streams,
             schemas,
             dispatcher,
+            state_router,
             health,
         }
     }
@@ -132,6 +138,7 @@ where
             http2_max_concurrent_streams,
             schemas,
             dispatcher,
+            state_router,
             health,
         } = self;
 
@@ -189,7 +196,7 @@ where
             .layer(CorsLayer::very_permissive())
             .layer(layers::load_shed::LoadShedLayer::new(concurrency_limit))
             .layer(layers::tracing_context_extractor::HttpTraceContextExtractorLayer)
-            .service(Handler::new(schemas, dispatcher));
+            .service(Handler::new(schemas, dispatcher, state_router));
 
         // todo(azmy): `CorsLayer` should sit above `RequestBodyLimitLayer` so CORS is applied
         // as early as possible. This is currently blocked because `CorsLayer` requires the
@@ -334,7 +341,7 @@ mod tests {
     use super::mocks::*;
     use super::*;
 
-    use http_body_util::BodyExt;
+    use bytes::Bytes;
     use http_body_util::Full;
     use hyper_util::client::legacy::Client;
     use hyper_util::rt::TokioExecutor;
@@ -408,7 +415,7 @@ mod tests {
             .http2_only(true)
             .build::<_, Full<Bytes>>(UnixSocketConnector::new(socket_path));
 
-        let http_response = client
+        let http_response: http::Response<hyper::body::Incoming> = client
             .request(
                 http::Request::post("http://localhost/greeter.Greeter/greet")
                     .header(http::header::CONTENT_TYPE, "application/json")
@@ -427,7 +434,10 @@ mod tests {
         // Read the http_response_future
         assert_eq!(http_response.status(), http::StatusCode::OK);
         let (_, response_body) = http_response.into_parts();
-        let response_bytes = response_body.collect().await.unwrap().to_bytes();
+        let response_bytes = http_body_util::BodyExt::collect(response_body)
+            .await
+            .unwrap()
+            .to_bytes();
         let response_value: GreetingResponse = serde_json::from_slice(&response_bytes).unwrap();
         restate_test_util::assert_eq!(response_value.greeting, "Igal");
     }
@@ -448,6 +458,7 @@ mod tests {
             Live::from_value(mock_schemas()),
             Arc::new(mock_request_dispatcher),
             health.ingress_status(),
+            None,
         );
         TaskCenter::spawn(TaskKind::SystemService, "ingress", ingress.run()).unwrap();
     }

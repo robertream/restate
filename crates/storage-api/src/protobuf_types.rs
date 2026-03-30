@@ -1865,11 +1865,17 @@ pub mod v1 {
                         .service_id
                         .ok_or_else(|| ConversionError::missing_field("service_id"))?,
                 )?;
-                let state = state_mutation
-                    .kv_pairs
-                    .into_iter()
-                    .map(|kv| (kv.key, kv.value))
-                    .collect();
+                let state = if state_mutation.clear_on_empty && state_mutation.kv_pairs.is_empty() {
+                    None
+                } else {
+                    Some(
+                        state_mutation
+                            .kv_pairs
+                            .into_iter()
+                            .map(|kv| (kv.key, kv.value))
+                            .collect(),
+                    )
+                };
 
                 Ok(restate_types::state_mut::ExternalStateMutation {
                     service_id,
@@ -1882,16 +1888,21 @@ pub mod v1 {
         impl From<restate_types::state_mut::ExternalStateMutation> for StateMutation {
             fn from(state_mutation: restate_types::state_mut::ExternalStateMutation) -> Self {
                 let service_id = ServiceId::from(state_mutation.service_id);
-                let kv_pairs = state_mutation
-                    .state
-                    .into_iter()
-                    .map(|(key, value)| KvPair { key, value })
-                    .collect();
+                let (kv_pairs, clear_on_empty) = match state_mutation.state {
+                    None => (vec![], true),
+                    Some(map) => (
+                        map.into_iter()
+                            .map(|(key, value)| KvPair { key, value })
+                            .collect(),
+                        false,
+                    ),
+                };
 
                 StateMutation {
                     service_id: Some(service_id),
                     version: state_mutation.version,
                     kv_pairs,
+                    clear_on_empty,
                 }
             }
         }

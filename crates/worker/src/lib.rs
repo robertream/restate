@@ -42,6 +42,7 @@ use restate_core::partitions::PartitionRouting;
 use restate_core::{Metadata, TaskKind};
 use restate_core::{MetadataWriter, TaskCenter};
 use restate_ingestion_client::IngestionClient;
+use restate_ingress_http::StateRouter;
 use restate_ingress_kafka::Service as IngressKafkaService;
 use restate_partition_store::PartitionStoreManager;
 use restate_partition_store::snapshots::SnapshotRepository;
@@ -117,6 +118,7 @@ where
         router_builder: &mut MessageRouterBuilder,
         metadata_writer: MetadataWriter,
         remote_scanner_manager: RemoteScannerManager,
+        state_router: StateRouter,
     ) -> Result<Self, BuildError> {
         metric_definitions::describe_metrics();
         restate_vqueues::describe_metrics();
@@ -183,6 +185,7 @@ where
             .await
             .map_err(BuildError::SnapshotRepository)?,
             ppm_ingestion_client,
+            state_router,
         );
 
         let rule_book_cache_handle = partition_processor_manager.rule_book_cache_handle();

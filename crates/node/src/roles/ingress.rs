@@ -11,7 +11,7 @@
 use restate_core::network::{Networking, TransportConnect};
 use restate_core::partitions::PartitionRouting;
 use restate_core::{TaskCenter, TaskKind};
-use restate_ingress_http::{HyperServerIngress, InvocationClientRequestDispatcher};
+use restate_ingress_http::{HyperServerIngress, InvocationClientRequestDispatcher, StateRouter};
 use restate_types::config::IngressOptions;
 use restate_types::health::HealthStatus;
 use restate_types::live::{BoxLiveLoad, Live};
@@ -31,6 +31,7 @@ pub struct IngressRole<T> {
 }
 
 impl<T: TransportConnect> IngressRole<T> {
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         mut ingress_options: BoxLiveLoad<IngressOptions>,
         address_book: &mut AddressBook,
@@ -39,6 +40,7 @@ impl<T: TransportConnect> IngressRole<T> {
         schema: Live<Schema>,
         partition_table: Live<PartitionTable>,
         partition_routing: PartitionRouting,
+        state_router: Option<StateRouter>,
     ) -> Self {
         let dispatcher = InvocationClientRequestDispatcher::new(
             PartitionProcessorInvocationClient::new(networking, partition_table, partition_routing),
@@ -49,6 +51,7 @@ impl<T: TransportConnect> IngressRole<T> {
             dispatcher,
             schema,
             health,
+            state_router,
         );
 
         Self { ingress_http }

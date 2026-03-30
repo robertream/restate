@@ -8,12 +8,15 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::ops::RangeBounds;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::anyhow;
+use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use bytes::Bytes;
 use bytes::BytesMut;
 use enum_map::Enum;
@@ -26,21 +29,25 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use restate_core::ShutdownError;
 use restate_rocksdb::{IoMode, IterAction, Priority, RocksDb, RocksError};
 use restate_storage_api::fsm_table::ReadFsmTable;
 use restate_storage_api::protobuf_types::{PartitionStoreProtobufValue, ProtobufStorageWrapper};
+use restate_storage_api::state_table::ReadStateTable;
 use restate_storage_api::{IsolationLevel, Storage, StorageError, Transaction};
 use restate_types::config::Configuration;
-use restate_types::identifiers::{PartitionId, PartitionKey, SnapshotId, WithPartitionKey};
+use restate_types::identifiers::{
+    PartitionId, PartitionKey, ServiceId, SnapshotId, WithPartitionKey,
+};
 use restate_types::logs::Lsn;
 use restate_types::partitions::Partition;
 use restate_types::sharding::KeyRange;
 use restate_types::storage::StorageCodec;
 use restate_types::storage::StorageDecode;
 use restate_types::storage::StorageEncode;
+use serde_json::Value;
 
 use restate_types::partitions::StorageVersion;
 
@@ -54,6 +61,114 @@ use crate::partition_db::PartitionDb;
 use crate::scan::PhysicalScan;
 use crate::scan::TableScan;
 use crate::snapshots::{LocalPartitionSnapshot, SnapshotDir};
+
+/// Accumulated state change for one service within a transaction, and the operation carried by
+/// a [`StateChangeEvent`].
+///
+/// Values are stored as raw bytes; the SSE handler encodes them to JSON via
+/// [`StateChangeOperation::encode_value`] when building event data.
+#[derive(Debug, Clone)]
+pub enum StateChangeOperation {
+    /// Incremental patch: some keys assigned and/or deleted on top of existing state.
+    Patch {
+        assigned: HashMap<String, Bytes>,
+        deleted: HashSet<String>,
+    },
+    /// All state was cleared atomically with no new values set.
+    ClearAll,
+    /// State was fully replaced: prior state is gone, new state is exactly these pairs.
+    /// Used when a clear was followed by new assignments, or equivalently when a replace
+    /// removed all existing keys and set new ones.
+    Replace { state: HashMap<String, Bytes> },
+}
+
+impl Default for StateChangeOperation {
+    fn default() -> Self {
+        StateChangeOperation::Patch {
+            assigned: HashMap::new(),
+            deleted: HashSet::new(),
+        }
+    }
+}
+
+impl StateChangeOperation {
+    pub(crate) fn assign(&mut self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) {
+        let Ok(key) = std::str::from_utf8(key.as_ref()) else {
+            warn!("SSE: skipping non-UTF-8 key in state change event");
+            return;
+        };
+        let value = Bytes::copy_from_slice(value.as_ref());
+
+        match self {
+            StateChangeOperation::Patch { assigned, deleted } => {
+                deleted.remove(key);
+                assigned.insert(key.to_string(), value);
+            }
+            StateChangeOperation::ClearAll => {
+                *self = StateChangeOperation::Replace {
+                    state: HashMap::from([(key.to_string(), value)]),
+                };
+            }
+            StateChangeOperation::Replace { state } => {
+                state.insert(key.to_string(), value);
+            }
+        }
+    }
+
+    pub(crate) fn delete(&mut self, key: impl AsRef<[u8]>) {
+        let Ok(key) = std::str::from_utf8(key.as_ref()) else {
+            warn!("SSE: skipping non-UTF-8 key in state change event");
+            return;
+        };
+
+        match self {
+            StateChangeOperation::Patch { assigned, deleted } => {
+                assigned.remove(key);
+                deleted.insert(key.to_string());
+            }
+            StateChangeOperation::ClearAll => {
+                // delete after clear is a no-op
+            }
+            StateChangeOperation::Replace { state } => {
+                state.remove(key);
+            }
+        }
+    }
+
+    pub(crate) fn clear_all(&mut self) {
+        *self = StateChangeOperation::ClearAll;
+    }
+
+    pub fn encode_value(value: &[u8]) -> Value {
+        match std::str::from_utf8(value) {
+            Ok(s) => serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.to_owned())),
+            Err(_) => serde_json::json!({"$bytes": BASE64_STANDARD.encode(value)}),
+        }
+    }
+}
+
+/// Event emitted when virtual object state changes.
+#[derive(Debug, Clone)]
+pub struct StateChangeEvent {
+    pub service_id: ServiceId,
+    pub revision: u64,
+    pub operation: StateChangeOperation,
+}
+
+/// Commands sent from the SSE router to the per-partition subscription task.
+#[derive(Debug)]
+pub enum SubscriptionRequest {
+    Subscribe {
+        service_id: ServiceId,
+    },
+    Resubscribe {
+        service_id: ServiceId,
+        revision: u64,
+    },
+    Unsubscribe {
+        service_id: ServiceId,
+    },
+}
 
 pub type DB = rocksdb::DB;
 
@@ -266,6 +381,77 @@ impl PartitionStore {
 
     pub fn partition_key_range(&self) -> KeyRange {
         self.db.partition().key_range
+    }
+
+    /// Handle a subscription command from the SSE router.
+    /// Subscribe: adds to filter, reads full state snapshot, sends initial Replace event.
+    /// Unsubscribe: removes from filter.
+    pub async fn handle_watch_command(&mut self, cmd: SubscriptionRequest) -> Result<()> {
+        match cmd {
+            SubscriptionRequest::Subscribe { service_id } => {
+                self.db.subscribed_keys.write().insert(service_id.clone());
+
+                let revision = self
+                    .get_state_object_revision(&service_id)
+                    .await?
+                    .unwrap_or(0);
+
+                let state_stream = self.get_all_user_states_for_service(&service_id)?;
+                let mut state = HashMap::new();
+                futures::pin_mut!(state_stream);
+                while let Some(item) = futures::StreamExt::next(&mut state_stream).await {
+                    let (k, v) = item?;
+                    if let Ok(key) = std::str::from_utf8(&k) {
+                        state.insert(key.to_string(), v);
+                    }
+                }
+
+                let event = Arc::new(StateChangeEvent {
+                    service_id,
+                    revision,
+                    operation: StateChangeOperation::Replace { state },
+                });
+                // Await send so the Replace is guaranteed to be in the channel before any
+                // subsequent Patch events from the commit path.
+                let _ = self.db.state_change_tx.send(event).await;
+            }
+            SubscriptionRequest::Resubscribe {
+                service_id,
+                revision,
+            } => {
+                // Insert into subscribed_keys BEFORE reading revision so any concurrent commit
+                // either appears in the snapshot below or generates a Patch event.
+                self.db.subscribed_keys.write().insert(service_id.clone());
+
+                let current_revision = self
+                    .get_state_object_revision(&service_id)
+                    .await?
+                    .unwrap_or(0);
+
+                if current_revision != revision {
+                    let state_stream = self.get_all_user_states_for_service(&service_id)?;
+                    let mut state = HashMap::new();
+                    futures::pin_mut!(state_stream);
+                    while let Some(item) = futures::StreamExt::next(&mut state_stream).await {
+                        let (k, v) = item?;
+                        if let Ok(key) = std::str::from_utf8(&k) {
+                            state.insert(key.to_string(), v);
+                        }
+                    }
+
+                    let event = Arc::new(StateChangeEvent {
+                        service_id,
+                        revision: current_revision,
+                        operation: StateChangeOperation::Replace { state },
+                    });
+                    let _ = self.db.state_change_tx.send(event).await;
+                }
+            }
+            SubscriptionRequest::Unsubscribe { service_id } => {
+                self.db.subscribed_keys.write().remove(&service_id);
+            }
+        }
+        Ok(())
     }
 
     #[inline]
@@ -579,11 +765,13 @@ impl PartitionStore {
             write_batch_with_index: Some(rocksdb::WriteBatchWithIndex::new(0, true)),
             data_cf_handle,
             rocksdb: self.db.rocksdb(),
-            key_buffer: &mut self.key_buffer,
-            value_buffer: &mut self.value_buffer,
+            key_buffer: BytesMut::new(),
+            value_buffer: BytesMut::new(),
             meta: self.db.partition(),
             storage_version: self.storage_version,
             snapshot,
+            partition_store: self,
+            pending_state_changes: HashMap::new(),
         }
     }
 
@@ -815,10 +1003,13 @@ pub struct PartitionStoreTransaction<'a> {
     write_batch_with_index: Option<rocksdb::WriteBatchWithIndex>,
     rocksdb: &'a Arc<RocksDb>,
     data_cf_handle: &'a Arc<BoundColumnFamily<'a>>,
-    key_buffer: &'a mut BytesMut,
-    value_buffer: &'a mut BytesMut,
+    // Owned scratch buffers — avoids a borrow conflict with `partition_store`.
+    key_buffer: BytesMut,
+    value_buffer: BytesMut,
     storage_version: StorageVersion,
     snapshot: Option<SnapshotWithThreadMode<'a, rocksdb::DB>>,
+    partition_store: &'a PartitionStore,
+    pending_state_changes: HashMap<ServiceId, StateChangeOperation>,
 }
 
 impl PartitionStoreTransaction<'_> {
@@ -839,6 +1030,48 @@ impl PartitionStoreTransaction<'_> {
         }
 
         opts
+    }
+
+    pub(crate) fn record_state_assign(&mut self, service_id: ServiceId, key: Bytes, value: Bytes) {
+        self.pending_state_changes
+            .entry(service_id)
+            .or_default()
+            .assign(key, value);
+    }
+
+    pub(crate) fn record_state_delete(&mut self, service_id: ServiceId, key: Bytes) {
+        self.pending_state_changes
+            .entry(service_id)
+            .or_default()
+            .delete(key);
+    }
+
+    pub(crate) fn record_state_clear_all(&mut self, service_id: ServiceId) {
+        self.pending_state_changes
+            .entry(service_id)
+            .or_default()
+            .clear_all();
+    }
+
+    fn finalize_pending_state_changes(&mut self) -> Result<Vec<StateChangeEvent>> {
+        let pending: Vec<_> = self.pending_state_changes.drain().collect();
+        let mut events = Vec::new();
+        for (service_id, operation) in pending {
+            // Skip a Patch that accumulated no actual changes.
+            if let StateChangeOperation::Patch { assigned, deleted } = &operation
+                && assigned.is_empty()
+                && deleted.is_empty()
+            {
+                continue;
+            }
+            let revision = self.increment_state_object_revision(&service_id)?;
+            events.push(StateChangeEvent {
+                service_id,
+                revision,
+                operation,
+            });
+        }
+        Ok(events)
     }
 
     #[inline]
@@ -966,6 +1199,11 @@ fn assert_partition_key_or_err(
 
 impl Transaction for PartitionStoreTransaction<'_> {
     async fn commit(&mut self) -> Result<()> {
+        // Finalize pending state changes: increment revision once per service_id and collect
+        // the batched events. The revision writes go into the write batch so they're committed
+        // atomically with the state mutations.
+        let state_change_events = self.finalize_pending_state_changes()?;
+
         let Some(write_batch) = self
             .write_batch_with_index
             .take_if(|batch| !batch.is_empty())
@@ -998,6 +1236,22 @@ impl Transaction for PartitionStoreTransaction<'_> {
                 .map_err(|error| StorageError::Generic(error.into()))?,
         );
         self.write_batch_with_index.as_mut().unwrap().clear();
+
+        // Send filtered state change events to the SSE listener after a successful commit.
+        let subscribed = self.partition_store.db.subscribed_keys.read();
+        for event in state_change_events {
+            if subscribed.contains(&event.service_id)
+                && self
+                    .partition_store
+                    .db
+                    .state_change_tx
+                    .try_send(Arc::new(event))
+                    .is_err()
+            {
+                warn!("state change channel full or closed, dropping event");
+            }
+        }
+
         Ok(())
     }
 }
@@ -1049,14 +1303,14 @@ impl StorageAccess for PartitionStoreTransaction<'_> {
     fn cleared_key_buffer_mut(&mut self, min_size: usize) -> &mut BytesMut {
         self.key_buffer.clear();
         self.key_buffer.reserve(min_size);
-        self.key_buffer
+        &mut self.key_buffer
     }
 
     #[inline]
     fn cleared_value_buffer_mut(&mut self, min_size: usize) -> &mut BytesMut {
         self.value_buffer.clear();
         self.value_buffer.reserve(min_size);
-        self.value_buffer
+        &mut self.value_buffer
     }
 
     #[inline]
@@ -1440,5 +1694,84 @@ mod tests {
         } else {
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod state_change_operation_tests {
+    use std::collections::HashSet;
+
+    use bytes::Bytes;
+
+    use super::StateChangeOperation;
+
+    fn k(s: &'static str) -> Bytes {
+        Bytes::from_static(s.as_bytes())
+    }
+
+    fn v(s: &'static str) -> Bytes {
+        Bytes::from_static(s.as_bytes())
+    }
+
+    // Patch: overwrite, dedup, last-write-wins cross-field cancellation, and clear_all transition.
+    #[test]
+    fn patch_operations() {
+        let mut op = StateChangeOperation::default();
+        op.assign(Bytes::from("a"), Bytes::from("1"));
+        op.assign(Bytes::from("a"), Bytes::from("2")); // overwrite — last value wins
+        op.delete(Bytes::from("b"));
+        op.delete(Bytes::from("b")); // dedup — only one entry in deleted
+        op.assign(Bytes::from("c"), Bytes::from("3"));
+        op.delete(Bytes::from("c")); // assign then delete: ends up only in deleted
+        op.delete(Bytes::from("d"));
+        op.assign(Bytes::from("d"), Bytes::from("4")); // delete then assign: ends up only in assigned
+        let StateChangeOperation::Patch { assigned, deleted } = op else {
+            panic!("expected Patch");
+        };
+        assert_eq!(assigned["a"], Bytes::from_static(b"2"));
+        assert_eq!(deleted, HashSet::from(["b".to_string(), "c".to_string()]));
+        assert_eq!(assigned["d"], Bytes::from_static(b"4"));
+        assert!(!deleted.contains("d"));
+
+        // clear_all wipes everything and transitions variant
+        let mut op = StateChangeOperation::default();
+        op.assign(Bytes::from("a"), Bytes::from("1"));
+        op.delete(Bytes::from("b"));
+        op.clear_all();
+        assert!(matches!(op, StateChangeOperation::ClearAll));
+    }
+
+    // ClearAll: delete is a no-op; assign promotes to Replace; clear_all is idempotent.
+    #[test]
+    fn clear_all_transitions() {
+        let mut op = StateChangeOperation::ClearAll;
+        op.delete(Bytes::from("x")); // no-op
+        assert!(matches!(op, StateChangeOperation::ClearAll));
+        op.clear_all(); // idempotent
+        assert!(matches!(op, StateChangeOperation::ClearAll));
+
+        op.assign(Bytes::from("a"), Bytes::from("1")); // promotes to Replace
+        let StateChangeOperation::Replace { state } = op else {
+            panic!("expected Replace");
+        };
+        assert_eq!(state["a"], Bytes::from_static(b"1"));
+    }
+
+    // Replace: assign adds/overwrites; delete removes; clear_all transitions back to ClearAll.
+    #[test]
+    fn replace_operations() {
+        let mut op = StateChangeOperation::ClearAll;
+        op.assign(k("a"), v("1"));
+        op.assign(k("b"), v("2"));
+        op.delete(k("a")); // remove one key
+        let StateChangeOperation::Replace { state } = &op else {
+            panic!("expected Replace");
+        };
+        assert!(!state.contains_key("a"));
+        assert_eq!(state["b"], Bytes::from_static(b"2"));
+
+        // clear_all reverts Replace back to ClearAll
+        op.clear_all();
+        assert!(matches!(op, StateChangeOperation::ClearAll));
     }
 }

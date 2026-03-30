@@ -96,7 +96,7 @@ pub(crate) async fn update_state(
     // TODO(tillrohrmann): allow CLI state commands to specify scope
     let req = ModifyServiceStateRequest {
         version: expected_version,
-        new_state,
+        new_state: Some(new_state),
         object_key: service_key.to_string(),
         scope: None,
     };

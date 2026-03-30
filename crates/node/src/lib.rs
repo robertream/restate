@@ -33,6 +33,7 @@ use restate_core::{Metadata, MetadataKind, MetadataWriter, TaskKind, migrate_met
 use restate_core::{MetadataBuilder, MetadataManager, TaskCenter, spawn_metadata_manager};
 use restate_futures_util::overdue::OverdueLoggingExt;
 use restate_ingestion_client::{IngestionClient, SessionOptions};
+use restate_ingress_http::StateRouter;
 use restate_limiter::rule_book::RuleBookObserver;
 use restate_log_server::LogServerService;
 use restate_storage_query_datafusion::context::{NoTables, QueryContext};
@@ -264,6 +265,7 @@ impl Node {
 
         let partition_store_manager =
             PartitionStoreManager::create(marker.uses_multi_db_layout()).await?;
+        let state_router = StateRouter::default();
 
         let log_server = if config.has_role(Role::LogServer) {
             Some(
@@ -330,6 +332,7 @@ impl Node {
                     ingestion_client.clone(),
                     metadata_manager.writer(),
                     remote_scanner_manager.clone(),
+                    state_router.clone(),
                 )
                 .await?,
             )
@@ -381,6 +384,7 @@ impl Node {
                 metadata.updateable_schema(),
                 metadata.updateable_partition_table(),
                 PartitionRouting::new(replica_set_states.clone(), tc.clone()),
+                Some(state_router.clone()),
             ))
         } else {
             None

@@ -339,7 +339,7 @@ mod tests {
             &InboxEntry::StateMutation(ExternalStateMutation {
                 service_id,
                 version: None,
-                state: HashMap::default(),
+                state: Some(HashMap::default()),
             }),
         )
         .unwrap();

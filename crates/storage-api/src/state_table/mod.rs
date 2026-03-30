@@ -46,6 +46,13 @@ pub trait ReadStateTable {
         > + Send
         + 'a,
     >;
+
+    /// Get the current revision counter for a virtual object state.
+    /// Returns None if the object has not been modified yet (no state).
+    fn get_state_object_revision(
+        &mut self,
+        service_id: &ServiceId,
+    ) -> impl Future<Output = Result<Option<u64>>> + Send;
 }
 
 pub trait ScanStateTable {

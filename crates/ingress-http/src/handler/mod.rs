@@ -13,6 +13,7 @@ mod error;
 mod health;
 mod invocation;
 mod lookup;
+mod objects;
 mod path_parsing;
 mod responses;
 mod service_handler;
@@ -29,7 +30,6 @@ use enumset::EnumSet;
 use error::HandlerError;
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use http_body_util::Full;
 use hyper::http::HeaderValue;
 use hyper::{Request, Response};
 use serde::Deserialize;
@@ -47,8 +47,10 @@ use restate_util_string::{ReString, RestrictedValue};
 
 use super::*;
 use crate::handler::path_parsing::{
-    AwakeableRequestType, InvocationRequestType, ServiceRequestType, WorkflowRequestType,
+    AwakeableRequestType, InvocationRequestType, ObjectStateRequestType, ServiceRequestType,
+    WorkflowRequestType,
 };
+use crate::state_router::StateRouter;
 
 const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
 
@@ -69,6 +71,8 @@ enum RequestType {
     OutputByTarget,
     /// `POST /restate/lookup`
     Lookup,
+    /// `GET /restate/objects/{service}/{key}/state`
+    ObjectState(ObjectStateRequestType),
 }
 
 #[derive(Clone)]
@@ -76,29 +80,35 @@ pub(crate) struct Handler<Schemas, Dispatcher> {
     schemas: Live<Schemas>,
     dispatcher: Dispatcher,
     cluster_features: EnumSet<ClusterFeature>,
+    state_router: Option<StateRouter>,
 }
 
 impl<Schemas, Dispatcher> Handler<Schemas, Dispatcher> {
-    pub(crate) fn new(schemas: Live<Schemas>, dispatcher: Dispatcher) -> Self {
+    pub(crate) fn new(
+        schemas: Live<Schemas>,
+        dispatcher: Dispatcher,
+        state_router: Option<StateRouter>,
+    ) -> Self {
         let cluster_features = Metadata::with_current(|m| m.nodes_config_ref().features());
 
         Self {
             schemas,
             dispatcher,
             cluster_features,
+            state_router,
         }
     }
 }
 
-impl<Schemas, Dispatcher, Body> tower::Service<Request<Body>> for Handler<Schemas, Dispatcher>
+impl<Schemas, Dispatcher, ReqBody> tower::Service<Request<ReqBody>> for Handler<Schemas, Dispatcher>
 where
     Schemas: ServiceMetadataResolver + InvocationTargetResolver + Clone + Send + Sync + 'static,
     Dispatcher: RequestDispatcher + Clone + Send + Sync + 'static,
-    Body: http_body::Body + Send + 'static,
-    <Body as http_body::Body>::Data: Send + 'static,
-    <Body as http_body::Body>::Error: Into<GenericError>,
+    ReqBody: http_body::Body + Send + 'static,
+    <ReqBody as http_body::Body>::Data: Send + 'static,
+    <ReqBody as http_body::Body>::Error: Into<GenericError>,
 {
-    type Response = Response<Full<Bytes>>;
+    type Response = Response<axum::body::Body>;
     type Error = Infallible;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
@@ -106,46 +116,64 @@ where
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: Request<Body>) -> Self::Future {
+    fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
         let res = self.parse_path(req.uri());
 
         let mut this = self.clone();
         async move {
             match res? {
-                RequestType::Health => this.handle_health(req),
+                RequestType::Health => this
+                    .handle_health(req)
+                    .map(|resp| resp.map(axum::body::Body::new)),
                 RequestType::OpenAPI => {
                     // TODO
                     Err(HandlerError::NotImplemented)
                 }
-                RequestType::Awakeable(awakeable_request) => {
-                    this.handle_awakeable(req, awakeable_request).await
+                RequestType::Awakeable(awakeable_request) => this
+                    .handle_awakeable(req, awakeable_request)
+                    .await
+                    .map(|resp| resp.map(axum::body::Body::new)),
+                RequestType::Service(service_request) => this
+                    .handle_service_request(req, service_request)
+                    .await
+                    .map(|resp| resp.map(axum::body::Body::new)),
+                RequestType::Invocation(invocation_request) => this
+                    .handle_invocation(req, invocation_request)
+                    .await
+                    .map(|resp| resp.map(axum::body::Body::new)),
+                RequestType::Workflow(workflow_request) => this
+                    .handle_workflow(req, workflow_request)
+                    .await
+                    .map(|resp| resp.map(axum::body::Body::new)),
+                RequestType::ObjectState(object_request) => {
+                    this.handle_object_state(req, object_request).await
                 }
-                RequestType::Service(service_request) => {
-                    this.handle_service_request(req, service_request).await
-                }
-                RequestType::Invocation(invocation_request) => {
-                    this.handle_invocation(req, invocation_request).await
-                }
-                RequestType::Workflow(workflow_request) => {
-                    this.handle_workflow(req, workflow_request).await
-                }
-                RequestType::Attach(invocation_id) => {
-                    this.handle_invocation_attach(req, InvocationQuery::Invocation(invocation_id))
-                        .await
-                }
-                RequestType::Output(invocation_id) => {
-                    this.handle_invocation_get_output(
+                RequestType::Attach(invocation_id) => this
+                    .handle_invocation_attach(req, InvocationQuery::Invocation(invocation_id))
+                    .await
+                    .map(|resp| resp.map(axum::body::Body::new)),
+                RequestType::Output(invocation_id) => this
+                    .handle_invocation_get_output(
                         req,
                         InvocationQuery::Invocation(invocation_id),
                     )
                     .await
-                }
-                RequestType::AttachByTarget => this.handle_attach_by_target(req).await,
-                RequestType::OutputByTarget => this.handle_output_by_target(req).await,
-                RequestType::Lookup => this.handle_lookup(req).await,
+                    .map(|resp| resp.map(axum::body::Body::new)),
+                RequestType::AttachByTarget => this
+                    .handle_attach_by_target(req)
+                    .await
+                    .map(|resp| resp.map(axum::body::Body::new)),
+                RequestType::OutputByTarget => this
+                    .handle_output_by_target(req)
+                    .await
+                    .map(|resp| resp.map(axum::body::Body::new)),
+                RequestType::Lookup => this
+                    .handle_lookup(req)
+                    .await
+                    .map(|resp| resp.map(axum::body::Body::new)),
             }
         }
-        .map(|r| Ok::<_, Infallible>(r.unwrap_or_else(|e| e.into_response())))
+        .map(|r| Ok::<_, Infallible>(r.unwrap_or_else(|e: HandlerError| e.into_response())))
         .boxed()
     }
 }

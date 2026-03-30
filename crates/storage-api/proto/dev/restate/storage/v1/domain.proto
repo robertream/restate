@@ -411,6 +411,9 @@ message StateMutation {
   ServiceId service_id = 1;
   optional string version = 2;
   repeated KvPair kv_pairs = 3;
+  // When true and kv_pairs is empty, clear all state atomically
+  // Ignored when kv_pairs is non-empty.
+  bool clear_on_empty = 4;
 }
 
 message InboxEntry {

@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::{Arc, Weak};
 
 use ahash::HashMap;
-use parking_lot::{RwLock, RwLockUpgradableReadGuard};
+use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard};
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -24,9 +24,12 @@ use restate_types::logs::{Lsn, SequenceNumber};
 use restate_types::partitions::Partition;
 use restate_types::protobuf::common::DatabaseKind;
 
+use tokio::sync::mpsc;
+
 use crate::SnapshotError;
 use crate::memory::MemoryController;
 use crate::partition_db::{AllDataCf, PartitionCell, PartitionDb, RocksConfigurator};
+use crate::partition_store::StateChangeEvent;
 use crate::snapshots::{LocalPartitionSnapshot, PartitionSnapshotStatus, Snapshots};
 use crate::{BuildError, OpenError, PartitionStore, SnapshotErrorKind};
 
@@ -35,6 +38,7 @@ const PARTITION_CF_PREFIX: &str = "data-";
 #[derive(Default)]
 pub(crate) struct SharedState {
     partitions: RwLock<HashMap<PartitionId, Arc<PartitionCell>>>,
+    state_change_receivers: Mutex<HashMap<PartitionId, mpsc::Receiver<Arc<StateChangeEvent>>>>,
 }
 
 impl SharedState {
@@ -93,10 +97,21 @@ impl SharedState {
             return cell;
         }
 
-        cell.open_cf(&mut state_guard, rocksdb);
+        if let Some(rx) = cell.open_cf(&mut state_guard, rocksdb) {
+            self.state_change_receivers
+                .lock()
+                .insert(partition.partition_id, rx);
+        }
 
         drop(state_guard);
         cell
+    }
+
+    pub fn take_state_change_receiver(
+        &self,
+        partition_id: PartitionId,
+    ) -> Option<mpsc::Receiver<Arc<StateChangeEvent>>> {
+        self.state_change_receivers.lock().remove(&partition_id)
     }
 
     /// Note: we only modify entries, never insert, from the event listener. If we don't find
@@ -209,6 +224,15 @@ impl PartitionStoreManager {
         cell.clone_db().await
     }
 
+    /// Take the state change receiver for the given partition.
+    /// Returns `Some` on the first call per partition; `None` thereafter.
+    pub fn take_state_change_receiver(
+        &self,
+        partition_id: PartitionId,
+    ) -> Option<mpsc::Receiver<Arc<StateChangeEvent>>> {
+        self.state.take_state_change_receiver(partition_id)
+    }
+
     /// Returns a partition store that's already open by a running partition processor
     pub async fn get_partition_store(&self, partition_id: PartitionId) -> Option<PartitionStore> {
         // note: we don't hold the map read lock while trying to acquire the partition cell's lock.
@@ -265,16 +289,23 @@ impl PartitionStoreManager {
         match (snapshot, target_lsn) {
             (None, None) => {
                 debug!("No snapshot found for partition, creating new partition store");
-                let db = cell.provision(&mut state_guard, rocksdb.clone()).await?;
+                let (db, rx) = cell.provision(&mut state_guard, rocksdb.clone()).await?;
+                self.state
+                    .state_change_receivers
+                    .lock()
+                    .insert(partition.partition_id, rx);
                 Ok(PartitionStore::from(db))
             }
 
             (Some(snapshot), None) => {
                 info!("Found partition snapshot, restoring it");
-                let db = cell
+                let (db, rx) = cell
                     .import_cf(&mut state_guard, snapshot, rocksdb.clone())
                     .await?;
-
+                self.state
+                    .state_change_receivers
+                    .lock()
+                    .insert(partition.partition_id, rx);
                 Ok(PartitionStore::from(db))
             }
 
@@ -288,9 +319,13 @@ impl PartitionStoreManager {
                     "Found snapshot with LSN >= target LSN, dropping local partition store state",
                 );
                 cell.drop_cf(&mut state_guard).await?;
-                let db = cell
+                let (db, rx) = cell
                     .import_cf(&mut state_guard, snapshot, rocksdb.clone())
                     .await?;
+                self.state
+                    .state_change_receivers
+                    .lock()
+                    .insert(partition.partition_id, rx);
                 Ok(PartitionStore::from(db))
             }
             (maybe_snapshot, Some(fast_forward_lsn)) => {
@@ -395,7 +430,11 @@ impl PartitionStoreManager {
         let rocksdb = self.open_rocksdb(partition).await?;
         let cell = self.state.get_or_default(partition);
         let mut state_guard = cell.inner.write().await;
-        let db = cell.import_cf(&mut state_guard, snapshot, rocksdb).await?;
+        let (db, rx) = cell.import_cf(&mut state_guard, snapshot, rocksdb).await?;
+        self.state
+            .state_change_receivers
+            .lock()
+            .insert(partition.partition_id, rx);
         Ok(PartitionStore::from(db))
     }
 

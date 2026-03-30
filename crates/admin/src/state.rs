@@ -18,7 +18,7 @@ use restate_types::schema::registry::SchemaRegistry;
 use restate_wal_protocol::Envelope;
 use std::sync::Arc;
 
-#[derive(Clone, derive_builder::Builder)]
+#[derive(Clone)]
 pub struct AdminServiceState<Metadata, Discovery, Telemetry, Invocations, Transport> {
     pub schema_registry: SchemaRegistry<Metadata, Discovery, Telemetry>,
     pub serdes_client: SerdesClient,

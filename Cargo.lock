@@ -7193,6 +7193,7 @@ dependencies = [
  "restate-limiter",
  "restate-metadata-providers",
  "restate-metadata-store",
+ "restate-partition-store",
  "restate-serde-util",
  "restate-service-client",
  "restate-service-protocol-v4",
@@ -7678,6 +7679,8 @@ name = "restate-ingress-http"
 version = "1.7.0-rc.4"
 dependencies = [
  "anyhow",
+ "axum",
+ "base64 0.22.1",
  "bytes",
  "bytestring",
  "chrono",
@@ -7697,12 +7700,15 @@ dependencies = [
  "pin-project-lite",
  "restate-core",
  "restate-hyper-uds",
+ "restate-partition-store",
+ "restate-storage-api",
  "restate-test-util",
  "restate-tracing-instrumentation",
  "restate-types",
  "restate-util-string",
  "restate-util-time",
  "restate-workspace-hack",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "serde_with",
@@ -8163,6 +8169,7 @@ version = "1.7.0-rc.4"
 dependencies = [
  "ahash",
  "anyhow",
+ "base64 0.22.1",
  "bilrost",
  "bytes",
  "bytestring",
@@ -8296,6 +8303,7 @@ name = "restate-server"
 version = "1.7.0-rc.4"
 dependencies = [
  "anyhow",
+ "bytes",
  "bytestring",
  "clap",
  "codederror",

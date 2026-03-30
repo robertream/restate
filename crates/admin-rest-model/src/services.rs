@@ -116,7 +116,8 @@ pub struct ModifyServiceStateRequest {
 
     /// # New State
     ///
-    /// The new state to replace the previous state with
-    #[cfg_attr(feature = "schema", schema(value_type = HashMap<String, Vec<u8>>))]
-    pub new_state: HashMap<String, Bytes>,
+    /// The new state to replace the previous state with. Pass `null` to clear all state atomically
+    /// (emits a single CLR event). Pass `{}` to delete existing keys one-by-one (per-key DEL events).
+    #[cfg_attr(feature = "schema", schema(value_type = Option<HashMap<String, Vec<u8>>>))]
+    pub new_state: Option<HashMap<String, Bytes>>,
 }

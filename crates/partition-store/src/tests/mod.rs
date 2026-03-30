@@ -103,7 +103,7 @@ pub(crate) fn mock_state_mutation(service_id: ServiceId) -> ExternalStateMutatio
     ExternalStateMutation {
         service_id,
         version: None,
-        state: HashMap::default(),
+        state: Some(HashMap::default()),
     }
 }
 

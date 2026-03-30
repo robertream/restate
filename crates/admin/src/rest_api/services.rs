@@ -15,6 +15,8 @@ use axum::extract::{Path, State};
 use bytes::Bytes;
 use http::StatusCode;
 
+use std::collections::HashMap;
+
 use restate_admin_rest_model::services::ListServicesResponse;
 use restate_admin_rest_model::services::*;
 use restate_core::TaskCenter;
@@ -220,7 +222,7 @@ where
         if !svc.ty.has_state() {
             return Err(MetaApiError::UnsupportedOperation("modify state", svc.ty));
         }
-    } else if new_state.is_empty() {
+    } else if new_state.as_ref().is_none_or(|m| m.is_empty()) {
         // could be a deleted service; we still want to allow state to be cleared, so lets continue given that the new state is empty
         debug!(
             rpc.service = service_name,
@@ -238,10 +240,11 @@ where
 
     let service_id = ServiceId::new(scope, service_name, object_key);
 
-    let new_state = new_state
-        .into_iter()
-        .map(|(k, v)| (Bytes::from(k), v))
-        .collect();
+    let new_state = new_state.map(|m| {
+        m.into_iter()
+            .map(|(k, v)| (Bytes::from(k), v))
+            .collect::<HashMap<_, _>>()
+    });
 
     let partition_key = service_id.partition_key();
     let patch_state = ExternalStateMutation {
