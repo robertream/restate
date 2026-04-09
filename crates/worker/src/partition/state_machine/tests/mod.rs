@@ -17,6 +17,7 @@ pub mod fixtures;
 mod idempotency;
 mod kill_cancel;
 pub mod matchers;
+mod simulation;
 mod workflow;
 
 use crate::partition::state_machine::tests::fixtures::{
@@ -149,47 +150,42 @@ impl TestEnv {
         }
     }
 
-    pub async fn apply(&mut self, command: Command) -> Vec<Action> {
+    pub async fn apply_with(
+        &mut self,
+        command: Command,
+        created_at: MillisSinceEpoch,
+        lsn: Lsn,
+        is_leader: bool,
+    ) -> Result<Vec<Action>, Error> {
         let mut transaction = self.storage.transaction();
         let mut action_collector = ActionCollector::default();
         let mut vqueues = VQueuesMetaMut::default();
         self.state_machine
             .apply(
                 command,
-                MillisSinceEpoch::now(),
-                Lsn::OLDEST,
+                created_at,
+                lsn,
                 &mut transaction,
                 &mut action_collector,
                 &mut vqueues,
-                true,
-            )
-            .await
-            .unwrap();
-
-        transaction.commit().await.unwrap();
-
-        action_collector
-    }
-
-    pub async fn apply_fallible(&mut self, command: Command) -> Result<Vec<Action>, Error> {
-        let mut transaction = self.storage.transaction();
-        let mut action_collector = ActionCollector::default();
-        let mut vqueues = VQueuesMetaMut::default();
-        self.state_machine
-            .apply(
-                command,
-                MillisSinceEpoch::now(),
-                Lsn::OLDEST,
-                &mut transaction,
-                &mut action_collector,
-                &mut vqueues,
-                true,
+                is_leader,
             )
             .await?;
 
         transaction.commit().await?;
 
         Ok(action_collector)
+    }
+
+    pub async fn apply(&mut self, command: Command) -> Vec<Action> {
+        self.apply_with(command, MillisSinceEpoch::now(), Lsn::OLDEST, true)
+            .await
+            .unwrap()
+    }
+
+    pub async fn apply_fallible(&mut self, command: Command) -> Result<Vec<Action>, Error> {
+        self.apply_with(command, MillisSinceEpoch::now(), Lsn::OLDEST, true)
+            .await
     }
 
     pub async fn apply_multiple(
