@@ -83,6 +83,7 @@ restate-storage-api = { workspace = true, features = ["test-util"] }
 restate-test-util = { workspace = true, features = ["prost"] }
 restate-types = { workspace = true, features = ["test-util"] }
 
+bilrost = { workspace = true }
 googletest = { workspace = true }
 mockall = { workspace = true }
 prost = { workspace = true }

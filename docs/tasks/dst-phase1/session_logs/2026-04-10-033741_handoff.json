@@ -1,0 +1,95 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-10-033741",
+  "branch_name": "dst-phase1",
+  "task_name": "dst-phase1",
+  "session_number": 2,
+  "continuity": {
+    "started": "2026-04-09",
+    "sessions_reviewed": 1,
+    "arc_goal": "Build Deterministic Simulation Testing (DST) infrastructure for Restate's partition processor (Phase 0-1 via seed-based StateMachine::apply simulation, Phase 1.5 via in-memory SimStorage, targeting TigerBeetle VOPR / FoundationDB levels), and fix issue #4566 (awakeable signal loss during leadership transitions) with proper TDD regression tests"
+  },
+  "progress_update": {
+    "summary": "Implemented DST Phase 1 with seed-based simulation test (1000 random commands via RocksDB TestEnv, 114ms). Built Phase 1.5 with SimStorage — in-memory storage implementation covering ~22 Transaction sub-traits in ~920 lines, proving out the storage layer abstraction for full PartitionProcessor simulation. Fixed issue #4566 by migrating append_signal and append_invocation_response from self_propose_and_respond_asynchronously to handle_rpc_proposal_command with new Action::ForwardAppendedResponse. Added proper TDD regression test at RPC handler level using MockActuator — verified FAILS on buggy code, PASSES on fixed code. All 156 worker tests pass, cargo clippy and fmt clean. Code review requested but interrupted.",
+    "goal": "Build Deterministic Simulation Testing infrastructure (Phase 1-1.5) to simulate partition processor apply_record pipeline with seed-based determinism and in-memory storage, fix issue #4566 with proper TDD regression test, and establish foundation for Phase 2 full PartitionProcessor simulation",
+    "accomplished": [
+      "Phase 1: state_machine_simulation test — 1000 random commands via RocksDB TestEnv (114ms runtime)",
+      "Phase 1.5: SimStorage with ~63 trait methods implemented in ~920 lines, in-memory BTreeMap backend, state_machine_simulation_with_dedup test passing (64ms)",
+      "Fixed #4566: migrated append_signal + append_invocation_response to handle_rpc_proposal_command, added Action::ForwardAppendedResponse, added Option<request_id> fields with #[serde(default)] for WAL backward compatibility",
+      "Proper TDD regression test at crates/worker/src/partition/rpc/append_signal.rs using MockActuator — verified test FAILS on buggy code, PASSES on fixed code",
+      "All 156 worker tests pass, cargo clippy clean, cargo fmt clean — ready for code review and commit"
+    ],
+    "now": "Code review of #4566 fix was dispatched but interrupted. Ready to re-run code review or proceed to /sweep for commit.",
+    "next_steps": [
+      "Run code review of the #4566 fix (spectre:reviewer) — focus on correctness, backward compat, completeness, and missing symmetric test for append_invocation_response",
+      "Address any review findings from code review",
+      "Run /spectre:sweep to clean, lint, test, and commit — likely multiple commits: (1) DST Phase 1, (2) DST Phase 1.5 with SimStorage, (3) #4566 fix",
+      "Consider adding release notes entry for #4566 fix if release-notes/unreleased/ exists",
+      "Plan Phase 2: full PartitionProcessor simulation with Bifrost::init_in_memory and run_inner loop integration"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "All 22 Transaction sub-traits required for SimStorage — some methods (vqueue, budgeted reads) are unimplemented! stubs that will panic if hit during tests",
+      "request_id field is Option<T> for backward WAL compatibility — old journal entries deserialize to None",
+      "Strategy A (handle_rpc_proposal_command) introduces latency: +5-20ms for local loglet, +50-100ms for replicated — acceptable per prior analysis",
+      "restart_as_new_invocation legacy path NOT migrated — intentionally deferred (being deprecated in fleet upgrade past protocol V4)",
+      "append_invocation Appended mode NOT migrated — still uses self_propose_and_respond_asynchronously (orthogonal concern, deferred)",
+      "bilrost added as dev-dep to restate-worker for vqueue trait generic bounds",
+      "All tables are logical (2-byte KeyKind prefix) within single RocksDB CF per partition — no write amplification",
+      "StateMachine::apply is near-pure — no internal randomness or system time (enables determinism)"
+    ],
+    "decisions": [
+      "Phase 1.5 tests dedup + state machine layer via SimStorage — does NOT include full run_inner loop (Phase 2 will use Bifrost::init_in_memory + PartitionProcessor)",
+      "DST dedup test validates dedup behavior (correct both before and after fix) — does NOT reproduce response-layer bug. Test renamed to issue_4566_dedup_drops_old_epoch_self_proposal to reflect actual semantics",
+      "Proper TDD regression test at RPC handler level (not state machine level) — uses MockActuator, asserts self_propose_and_respond_asynchronously.never() and verifies handle_rpc_proposal_command receives embedded request_id",
+      "Single Action::ForwardAppendedResponse variant rather than per-command variants — all affected sites (append_signal, append_invocation_response) return Appended response",
+      "Custom seed-based command generation over proptest — proptest shrinking doesn't work well for stateful sequences with RocksDB state",
+      "SimStorage uses in-memory BTreeMap backend for fast Phase 1.5 testing — Phase 2 will use TestEnv with RocksDB"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Should append_invocation Appended mode also be migrated per Option A research? Deferred to maintain scope focus.",
+      "Should we add symmetric regression test for append_invocation_response.rs at the RPC handler level?",
+      "Is there a release-notes/unreleased/ file that should be updated for #4566 fix?",
+      "Phase 2 approach: should we prioritize Bifrost::init_in_memory integration or LeaderState-level integration test first?"
+    ],
+    "risks": [
+      "request_id field added to NotifySignalRequest/InvocationResponse — WAL serialization backward compat depends on serde_hacks intermediary correctly roundtripping Option<T> with #[serde(default)]",
+      "State machine only emits ForwardAppendedResponse when is_leader — correct to avoid flooding followers, but must verify no follower code path accidentally emits",
+      "MockActuator-based RPC handler test is unit-level — integration test at LeaderState level would increase confidence",
+      "SimStorage unimplemented! stubs for vqueue/budgeted reads — if future tests hit these, they will panic (acceptable for Phase 1, must be implemented for Phase 2)"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "crates/worker/src/partition/state_machine/tests/simulation.rs",
+      "crates/worker/src/partition/state_machine/tests/sim_storage.rs",
+      "crates/worker/src/partition/state_machine/tests/mod.rs",
+      "crates/worker/src/partition/state_machine/actions.rs",
+      "crates/worker/src/partition/state_machine/mod.rs",
+      "crates/worker/src/partition/leadership/leader_state.rs",
+      "crates/worker/src/partition/rpc/append_signal.rs",
+      "crates/worker/src/partition/rpc/append_invocation_response.rs",
+      "crates/worker/src/partition/rpc/mod.rs",
+      "crates/types/src/invocation/mod.rs",
+      "crates/storage-api/src/protobuf_types.rs",
+      "crates/worker/Cargo.toml",
+      "docs/tasks/dst-phase1/specs/plan.md",
+      "docs/tasks/dst-phase1/specs/tasks.md",
+      "docs/tasks/dst-phase1/research/awakeable_signal_loss_issue_4566_040926.md",
+      "docs/tasks/dst-phase1/research/deterministic_simulation_testing_040926.md"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "cargo nextest run -p restate-worker --all-features",
+      "cargo nextest run -p restate-worker --all-features -E 'test(issue_4566)'",
+      "cargo clippy -p restate-worker --all-features --all-targets -- -D warnings",
+      "cargo fmt --all -- --check",
+      "git stash push/pop (verified TDD cycle: test FAILS on buggy code, PASSES on fixed)"
+    ]
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "774d17c8c"
+  }
+}

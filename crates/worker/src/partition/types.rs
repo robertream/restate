@@ -39,6 +39,7 @@ impl OutboxMessageExt for OutboxMessage {
                 caller_completion_id: entry_index,
             },
             result,
+            request_id: None,
         })
     }
 

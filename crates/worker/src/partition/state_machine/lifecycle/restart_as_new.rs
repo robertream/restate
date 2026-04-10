@@ -639,6 +639,7 @@ mod tests {
                         SignalId::for_index(1),
                         SignalResult::Success(Default::default()),
                     ),
+                    request_id: None,
                 }),
                 fixtures::invoker_entry_effect(
                     original_invocation_id,

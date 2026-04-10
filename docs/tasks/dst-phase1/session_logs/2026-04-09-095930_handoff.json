@@ -1,0 +1,104 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-09-095930",
+  "branch_name": "linked-services",
+  "task_name": "linked-services",
+  "session_number": 4,
+  "continuity": {
+    "started": "2026-04-08",
+    "sessions_reviewed": 3,
+    "arc_goal": "Implement three parallel workstreams: (1) linked services Phase A — object-to-object linking with completion, onCompleted handlers, GC cascade; (2) issue #4566 fix — awakeable signal loss during leadership transitions; (3) DST Phase 0-1 — seed-based simulation testing of StateMachine::apply for long-term testing infrastructure"
+  },
+  "progress_update": {
+    "summary": "Researched issue #4566 (awakeable signal loss during leadership transitions), designed fix strategy, analyzed performance impact, designed test strategy, then pivoted to researching Deterministic Simulation Testing (DST) for Restate. Created comprehensive DST research document, wrote implementation plan for DST Phase 0-1 (state machine simulation), and got it reviewed. Reviewer recommended significant simplification: drop the SimState oracle, use storage-level invariants, start with 3-4 command types. Ready to update plan and create tasks.",
+    "goal": "Three parallel tracks: (1) linked services Phase A implementation, (2) issue #4566 fix (awakeable signal loss), (3) DST Phase 0-1 — seed-based simulation test for StateMachine::apply",
+    "accomplished": [
+      "Deep research on issue #4566: root cause traced, 4 vulnerable call sites identified, fix strategy designed (migrate to handle_rpc_proposal_command), performance impact analyzed (+2-10ms, acceptable)",
+      "Designed multi-level test strategy for #4566: Level 1 RPC handler test (fails now, passes after fix), Level 2 dedup unit test, Level 3 state machine integration test",
+      "Comprehensive DST research: analyzed Restate's readiness (state machine is near-pure, existing abstractions for network/bifrost/timers), surveyed Rust frameworks (turmoil, madsim, mad-turmoil), recommended phased adoption",
+      "Wrote DST Phase 0-1 implementation plan: seed-based simulation testing of StateMachine::apply through TestEnv",
+      "Got plan reviewed — reviewer recommended radical simplification: one file ~150 lines, no oracle, HashSet<InvocationId> instead of SimState, storage-level invariants, 3-4 command types uniform distribution"
+    ],
+    "now": "Plan review complete for DST Phase 0-1. Need to update plan with reviewer's simplifications, then create task breakdown. User was asked whether to update plan or go straight to tasks.",
+    "next_steps": [
+      "Update DST Phase 0-1 plan with reviewer's simplifications (drop SimState, single file, storage invariants, 3-4 command types)",
+      "Create task breakdown for simplified DST Phase 0-1",
+      "Implement DST Phase 0-1: extend TestEnv with apply_with, write simulation.rs with seeded command generation + invariant checking",
+      "Resume linked-services Phase A implementation (Wave 1: ServiceEdges table, NodeId, VirtualObjectStatus::Completed)"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "All tables are logical (2-byte KeyKind prefix) within one RocksDB CF per partition — no write amplification from multiple tables",
+      "NodeId enum with Object variant only for Phase A — WorkflowInvocation added in Phase B",
+      "Proto type IDs: LinkService=0x0415/0x8015, CompleteService=0x0416/0x8016, UnlinkService=0x0417",
+      "StateMachine::apply is already near-pure — no internal randomness or system time",
+      "TestEnv uses real RocksDB (no in-memory storage impl) — sufficient for Phase 1",
+      "Mock helpers (InvocationId::mock_random) use unseeded rand::rng() — must bypass for determinism",
+      "TestEnv::apply hardcodes is_leader=true, MillisSinceEpoch::now(), Lsn::OLDEST — must parameterize",
+      "NotifySignalRequest and InvocationResponse need Optional request_id field added for #4566 fix",
+      "WAL serialization must remain backward compatible (Option<T> defaults to None)",
+      "ServiceCompletionNotification and InvocationResponse are orthogonal — graph management vs result delivery",
+      "Completed objects reject new invocations at inbox AND state mutations from in-flight handlers",
+      "LinkedFrom edges are presence-only (empty value)",
+      "Direct cycle detection only (point read) — transitive cycles cause GC leak but not correctness issue"
+    ],
+    "decisions": [
+      "Three parallel tracks for the project: linked-services Phase A, #4566 fix, and DST Phase 0-1 seeded simulation testing",
+      "Custom seed-based generation over proptest — proptest shrinking doesn't work well for stateful sequences with RocksDB",
+      "Plan reviewer recommends: HashSet<InvocationId> instead of SimState oracle, storage-level invariants (no oracle), single simulation.rs file, 3-4 command types with uniform distribution",
+      "Strategy A for #4566 fix: migrate append_signal/append_invocation_response to handle_rpc_proposal_command with new Action::ForwardAppendedResponse",
+      "Single Action::ForwardAppendedResponse rather than per-command action variants — all 3 high-priority sites return Appended",
+      "Level 1 RPC handler test as primary failing test — follows existing append_invocation.rs test patterns with MockActuator",
+      "Defer restart_as_new_invocation legacy path fix — it's being deprecated as fleet upgrades past protocol V4",
+      "Unlink (not RemoveLink) as the verb for edge removal — UnlinkServiceCommand, UnlinkServiceRequest, ctx.unlink()",
+      "VirtualObjectStatus: Unlocked | Locked(InvocationId) | Completed(ResponseResult) — mutually exclusive, Completed is terminal",
+      "Vertical command slices for linked-services implementation — each command task covers its full stack (journal + proto + codec + outbox + WAL)",
+      "EdgeState on LinkedTo: Active { completion_handler_name } | Completed — handler name consumed on completion, drops out",
+      "GC cascade: no parents + Completed → delete state/promises/status/edges + propagate UnlinkServiceRequest to children",
+      "Phase A ships independently from Phase B (invocation linking) — Phase A anchors only objects, Phase B adds WorkflowInvocation nodes"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Should we update the DST plan first or go straight to task breakdown with simplified approach?",
+      "Whether append_invocation Appended→Submitted response type change is a breaking API change",
+      "Whether WAL format version bump needed for adding Option<PartitionProcessorRpcRequestId> to command payloads",
+      "handle.getOutput() for objects — how does a workflow await an object's completion result? Likely via AttachInvocation-like mechanism",
+      "Batch GC optimization — batching UnlinkServiceRequest per destination partition (separate issue)",
+      "No timeout on partition processor RPCs — pre-existing concern surfaced during analysis"
+    ],
+    "risks": [
+      "Adding request_id to NotifySignalRequest changes WAL serialization — needs careful backward compatibility testing"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/tasks/linked-services/specs/plan_dst_phase1.md",
+      "docs/tasks/linked-services/reviews/review_2026-04-09_dst_plan.md",
+      "docs/tasks/linked-services/task_context_dst_phase1.md",
+      "docs/tasks/linked-services/research/deterministic_simulation_testing_040926.md",
+      "docs/tasks/linked-services/research/awakeable_signal_loss_issue_4566_040926.md",
+      "docs/design/linked_services.md",
+      "docs/tasks/linked-services/specs/tasks.md",
+      "crates/worker/src/partition/state_machine/tests/mod.rs",
+      "crates/worker/src/partition/state_machine/mod.rs",
+      "crates/wal-protocol/src/lib.rs",
+      "crates/worker/src/partition/rpc/append_signal.rs",
+      "crates/worker/src/partition/leadership/leader_state.rs",
+      "crates/storage-api/src/service_status_table/mod.rs",
+      "crates/partition-store/src/partition_store.rs",
+      "crates/partition-store/src/keys.rs",
+      "crates/types/src/journal_v2/command.rs",
+      "crates/service-protocol-v4/src/message_codec/mod.rs",
+      "service-protocol/dev/restate/service/protocol.proto"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "gh issue view 4566 --repo restatedev/restate",
+      "git rev-parse HEAD"
+    ]
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "f0d248e82"
+  }
+}

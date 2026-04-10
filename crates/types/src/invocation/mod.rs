@@ -573,6 +573,8 @@ impl WithInvocationId for JournalCompletionTarget {
 pub struct InvocationResponse {
     pub target: JournalCompletionTarget,
     pub result: ResponseResult,
+    #[serde(default)]
+    pub request_id: Option<PartitionProcessorRpcRequestId>,
 }
 
 impl WithInvocationId for InvocationResponse {
@@ -1327,6 +1329,8 @@ impl WithPartitionKey for AttachInvocationRequest {
 pub struct NotifySignalRequest {
     pub invocation_id: InvocationId,
     pub signal: Signal,
+    #[serde(default)]
+    pub request_id: Option<PartitionProcessorRpcRequestId>,
 }
 
 impl WithInvocationId for NotifySignalRequest {
@@ -1508,6 +1512,8 @@ mod serde_hacks {
         // #[serde(default, skip_serializing_if = "num_traits::Zero::is_zero")]
         // pub caller_invocation_epoch: InvocationEpoch,
         pub result: ResponseResult,
+        #[serde(default)]
+        pub request_id: Option<PartitionProcessorRpcRequestId>,
     }
 
     impl From<InvocationResponse> for super::InvocationResponse {
@@ -1518,6 +1524,7 @@ mod serde_hacks {
                     caller_completion_id: value.entry_index,
                 },
                 result: value.result,
+                request_id: value.request_id,
             }
         }
     }
@@ -1528,6 +1535,7 @@ mod serde_hacks {
                 id: value.target.caller_id,
                 entry_index: value.target.caller_completion_id,
                 result: value.result,
+                request_id: value.request_id,
             }
         }
     }
@@ -1772,6 +1780,7 @@ mod tests {
                     caller_completion_id,
                 },
                 result: result.clone(),
+                request_id: None,
             };
 
             let old_response: InvocationResponse_1_2 =

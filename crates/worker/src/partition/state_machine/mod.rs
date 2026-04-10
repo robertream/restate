@@ -548,7 +548,11 @@ impl<S> StateMachineApplyContext<'_, S> {
             Command::Invoke(service_invocation) => {
                 self.on_service_invocation(service_invocation).await
             }
-            Command::InvocationResponse(InvocationResponse { target, result }) => {
+            Command::InvocationResponse(InvocationResponse {
+                target,
+                result,
+                request_id,
+            }) => {
                 let status = self.get_invocation_status(&target.caller_id).await?;
 
                 if should_use_journal_table_v2(&status) {
@@ -560,15 +564,20 @@ impl<S> StateMachineApplyContext<'_, S> {
                     }
                     .apply(self)
                     .await?;
-                    return Ok(());
+                } else {
+                    let completion = Completion {
+                        entry_index: target.caller_completion_id,
+                        result: result.into(),
+                    };
+                    self.handle_completion(target.caller_id, status, completion)
+                        .await?;
                 }
 
-                let completion = Completion {
-                    entry_index: target.caller_completion_id,
-                    result: result.into(),
-                };
-                self.handle_completion(target.caller_id, status, completion)
-                    .await
+                if let Some(request_id) = request_id {
+                    self.action_collector
+                        .push(Action::ForwardAppendedResponse { request_id });
+                }
+                Ok(())
             }
             Command::ProxyThrough(service_invocation) => {
                 self.handle_outgoing_message(OutboxMessage::ServiceInvocation(service_invocation))?;
@@ -653,6 +662,10 @@ impl<S> StateMachineApplyContext<'_, S> {
                 }
                 .apply(self)
                 .await?;
+                if let Some(request_id) = notify_signal_request.request_id {
+                    self.action_collector
+                        .push(Action::ForwardAppendedResponse { request_id });
+                }
                 Ok(())
             }
             Command::NotifyGetInvocationOutputResponse(get_invocation_output_response) => {
@@ -2784,6 +2797,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                         InvocationResponse {
                             target,
                             result: result.clone(),
+                            request_id: None,
                         },
                     ))?,
                 ServiceInvocationResponseSink::Ingress { request_id } => self
@@ -3414,6 +3428,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                                         InvocationResponse {
                                             target: listener,
                                             result: completion.clone().into(),
+                                            request_id: None,
                                         },
                                     ))?;
                                 }
@@ -3650,6 +3665,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                                     }
                                 },
                             ),
+                            request_id: None,
                         },
                     ))?;
                 } else {
@@ -4554,6 +4570,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             OutboxMessage::ServiceResponse(InvocationResponse {
                 result: ResponseResult::Success(_),
                 target,
+                ..
             }) => {
                 debug_if_leader!(
                     self.is_leader,
@@ -4575,6 +4592,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             OutboxMessage::ServiceResponse(InvocationResponse {
                 result: ResponseResult::Failure(e),
                 target,
+                ..
             }) => {
                 debug_if_leader!(
                     self.is_leader,
@@ -4598,6 +4616,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             OutboxMessage::NotifySignal(NotifySignalRequest {
                 invocation_id,
                 signal,
+                ..
             }) => {
                 debug_if_leader!(
                     self.is_leader,

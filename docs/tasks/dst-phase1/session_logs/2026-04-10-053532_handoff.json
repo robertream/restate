@@ -1,0 +1,96 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-10-053532",
+  "branch_name": "dst-phase1",
+  "task_name": "dst-phase1",
+  "session_number": 4,
+  "continuity": {
+    "started": "2026-04-09",
+    "sessions_reviewed": 3,
+    "arc_goal": "Build Deterministic Simulation Testing (DST) infrastructure for Restate's partition processor targeting TigerBeetle VOPR / FoundationDB levels (Phase 1: seed-based StateMachine::apply, Phase 1.5: in-memory SimStorage, Phase 2: full PartitionProcessor), fix issue #4566 (awakeable signal loss during leadership transitions) with proper regression testing and review, and establish durable research artifacts for long-term correctness infrastructure"
+  },
+  "progress_update": {
+    "summary": "Completed independent code review of #4566 fix (migrated append_signal/append_invocation_response to handle_rpc_proposal_command with Action::ForwardAppendedResponse). Dispatched spectre:reviewer to address user's specific concern: why is a 'synchronous response' needed and is the ~1ms→~5ms latency hit justified? Verified fix correctness end-to-end, identified regression test gap (current test is mock-shape only, missing state-machine-level TestEnv assertion of ForwardAppendedResponse emission), produced scored verdict (ship-ready modulo two must-do items), and persisted comprehensive review to docs/tasks/dst-phase1/reviews/issue_4566_fix_review.md. User has verdict summary with prioritized action items.",
+    "goal": "Build DST Phase 1-1.5 infrastructure (complete), fix issue #4566 with review-approved verdict and proper regression testing, establish VOPR roadmap with ranked gap analysis, and deliver three logical commits (DST Phase 1, DST Phase 1.5 + SimStorage, #4566 fix) with release notes",
+    "accomplished": [
+      "Dispatched spectre:reviewer with tight focus on user's 'synchronous response' and 5x latency concerns",
+      "Persisted comprehensive review to docs/tasks/dst-phase1/reviews/issue_4566_fix_review.md including latency framing correction, correctness verification, and identified regression test gaps",
+      "Verified fix correctness end-to-end: race closed, WAL backward compatibility sound (serde_hacks intermediary correct, outer #[serde(default)] harmless), protobuf/outbox path correct (request_id=None for cross-partition intentional and safe), action emission ordering correct (after transaction.commit, no is_leader gate needed, followers no-op in handle_actions)",
+      "Identified and documented main weakness: TDD test is mock-shape only, missing state-machine-level TestEnv assertions that ForwardAppendedResponse is actually emitted by state_machine/mod.rs for both NotifySignal and InvocationResponse",
+      "Produced scored verdict: ship-ready modulo two must-do items before merge (release note in release-notes/unreleased/, TestEnv regression test asserting Action::ForwardAppendedResponse emission)"
+    ],
+    "now": "Review saved to docs/tasks/dst-phase1/reviews/issue_4566_fix_review.md. User has the verdict with specific action items and technical justification. 28 files WIP (DST Phase 1, Phase 1.5 + SimStorage, #4566 fix, determinism findings). Next actionable step is either (a) implement two must-do items from review (release note + TestEnv tests), (b) decide on sim_storage.rs:83 HashMap→BTreeMap fix (trivial determinism bug), or (c) run /spectre:sweep to commit as three logical chunks.",
+    "next_steps": [
+      "Add release-notes/unreleased/4566-*.md entry documenting the behavior change (bug fix that migrated signal/response forwarding from self_propose to handle_rpc_proposal, exposing LostLeadership retries to outbox layer, causing ~2x local / ~1.1x replicated latency shift on affected RPCs)",
+      "Add TestEnv state-machine-level regression test asserting Action::ForwardAppendedResponse is emitted for NotifySignal and InvocationResponse with request_id=Some(_) — this closes the main weakness identified in review",
+      "Add symmetric RPC handler mock-shape test in append_invocation_response.rs matching the append_signal.rs pattern, to validate both paths uniformly",
+      "Add DEPRECATED doc comment on self_propose_and_respond_asynchronously warning future callers that this path is no longer appropriate for RPC forwarding",
+      "Fix sim_storage.rs:83 HashMap→BTreeMap determinism bug (identified in Session 3, still unfixed) before shipping Phase 1.5",
+      "Run /spectre:sweep to commit DST Phase 1, Phase 1.5 + SimStorage, and #4566 fix as three logical commits with clear commit messages",
+      "Start Phase 2: full PartitionProcessor simulation with Bifrost::init_in_memory and run_inner loop integration, or implement SimModel oracle (#1 roadmap item per VOPR review)"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Code review was narrow per user request — did not re-audit DST Phase 1/1.5 code or re-verify all 28 WIP changes, only #4566 fix",
+      "Fix correctness verified via code reading against citations in research doc (awakeable_signal_loss_issue_4566_040926.md), not via new tests in this session",
+      "Research doc at docs/tasks/dst-phase1/research/awakeable_signal_loss_issue_4566_040926.md is canonical for race timeline, latency numbers, Strategy A/B/C/D analysis",
+      "TDD test at RPC handler level (append_signal.rs) is mock-shape — does not exercise state_machine/mod.rs emission point, hence regression test gap",
+      "All 22 Transaction sub-traits required for SimStorage — some methods (vqueue, budgeted reads) are unimplemented! stubs that will panic if hit",
+      "request_id field is Option<T> for backward WAL compatibility — old journal entries deserialize to None",
+      "Strategy A introduces latency: +5-20ms for local loglet, +50-100ms for replicated, dominated by public-internet RTT anyway, matches /send profile",
+      "restart_as_new_invocation legacy path NOT migrated — deferred (deprecated in fleet upgrade past protocol V4)",
+      "append_invocation Appended mode NOT migrated — deferred (orthogonal to #4566 bug fix)"
+    ],
+    "decisions": [
+      "Verdict: #4566 fix is correct and ships as-is subject to two must-do items (release note + TestEnv regression tests)",
+      "Rejected user's '5x slowdown' framing as misleading cherry-pick (best-case old vs. mid-case new); correct framing is ~2x local / ~1.1x replicated, dominated by WAN RTT, matches /send profile for years",
+      "Confirmed Strategy A (handle_rpc_proposal_command) is correct over B/C/D: B doesn't fix root layering issue, C breaks split-brain prevention, D is most invasive",
+      "Confirmed no is_leader gate needed at action emission site — consistent with other Forward* actions, followers no-op in handle_actions dispatch",
+      "Latency is acceptable: both paths are async oneshots (not 'synchronous'), change is necessary to fix bug, /send already runs on this profile",
+      "Main weakness: mock-shape test misses state-machine-level emission point — must add TestEnv assertion to close regression gap",
+      "Phase 1.5 tests dedup + state machine via SimStorage — does NOT include full run_inner loop (Phase 2 will use Bifrost::init_in_memory + PartitionProcessor)"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Will the user approve the two must-do items (release note + TestEnv test) as part of this branch, or defer to a follow-up?",
+      "Should the trivial sim_storage.rs:83 BTreeMap fix land on this branch or a follow-up?",
+      "Next session: implement must-do items, run /spectre:sweep to commit, or pivot to implement #1 roadmap item (SimModel oracle for VOPR-level testing)?"
+    ],
+    "risks": [
+      "28 files still WIP — context loss risk if /sweep isn't run soon to commit as three logical chunks",
+      "Shipping without state-machine-level TestEnv regression test means a future refactor could silently remove ForwardAppendedResponse emission in state_machine/mod.rs without any test failing (main weakness identified in review)",
+      "Release notes entry not yet written — must be added before merge per project CLAUDE.md rules",
+      "Code review now complete but two must-do items not yet implemented"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/tasks/dst-phase1/reviews/issue_4566_fix_review.md",
+      "docs/tasks/dst-phase1/research/awakeable_signal_loss_issue_4566_040926.md",
+      "docs/tasks/dst-phase1/research/dst_vs_tigerbeetle_vopr_review_041026.md",
+      "docs/tasks/dst-phase1/research/deterministic_simulation_testing_040926.md",
+      "crates/worker/src/partition/rpc/append_signal.rs",
+      "crates/worker/src/partition/rpc/append_invocation_response.rs",
+      "crates/worker/src/partition/rpc/mod.rs",
+      "crates/worker/src/partition/state_machine/actions.rs",
+      "crates/worker/src/partition/state_machine/mod.rs",
+      "crates/worker/src/partition/leadership/leader_state.rs",
+      "crates/types/src/invocation/mod.rs",
+      "crates/storage-api/src/protobuf_types.rs",
+      "crates/worker/src/partition/state_machine/tests/simulation.rs",
+      "crates/worker/src/partition/state_machine/tests/sim_storage.rs"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "git diff --stat HEAD -- crates/worker/src/partition/rpc/",
+      "git diff HEAD -- crates/worker/src/partition/rpc/append_signal.rs (etc)",
+      "ls docs/tasks/dst-phase1/",
+      "mkdir -p docs/tasks/dst-phase1/reviews"
+    ]
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "774d17c8c",
+    "session_arc": "Session 1 (04-09-095930): researched DST + #4566, got plan reviewed. Session 2 (04-10-033741): implemented DST Phase 1/1.5 + #4566 fix, code review interrupted. Session 3 (04-10-040607): VOPR review + gap analysis, documented findings, identified HashMap determinism bug. Session 4 (current, 04-10-053532): completed code review of #4566 fix with verdict and action items."
+  }
+}

@@ -9,12 +9,13 @@
 // by the Apache License, Version 2.0.
 
 use super::*;
-use restate_types::identifiers::WithPartitionKey;
+use restate_types::identifiers::{PartitionProcessorRpcRequestId, WithPartitionKey};
 use restate_types::invocation::InvocationResponse;
 use restate_types::net::partition_processor::PartitionProcessorRpcResponse;
 use restate_wal_protocol::Command;
 
 pub(super) struct Request {
+    pub(super) request_id: PartitionProcessorRpcRequestId,
     pub(super) invocation_response: InvocationResponse,
 }
 
@@ -27,16 +28,19 @@ impl<'a, TActuator: Actuator, TSchemas, TStorage> RpcHandler<Request>
     async fn handle(
         self,
         Request {
-            invocation_response,
+            request_id,
+            mut invocation_response,
         }: Request,
         replier: Replier<Self::Output>,
     ) -> Result<(), Self::Error> {
+        invocation_response.request_id = Some(request_id);
+        let partition_key = invocation_response.partition_key();
         self.proposer
-            .self_propose_and_respond_asynchronously(
-                invocation_response.partition_key(),
+            .handle_rpc_proposal_command(
+                partition_key,
                 Command::InvocationResponse(invocation_response),
+                request_id,
                 replier,
-                PartitionProcessorRpcResponse::Appended,
             )
             .await;
 

@@ -102,6 +102,7 @@ mod tests {
                 } else {
                     ResponseResult::Success(success_result.clone())
                 },
+                request_id: None,
             })
         };
 

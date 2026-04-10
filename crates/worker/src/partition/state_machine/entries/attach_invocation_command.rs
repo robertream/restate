@@ -86,6 +86,7 @@ mod tests {
                 Command::InvocationResponse(InvocationResponse {
                     target: JournalCompletionTarget::from_parts(invocation_id, completion_id),
                     result: ResponseResult::Success(success_result.clone()),
+                    request_id: None,
                 }),
             ])
             .await;

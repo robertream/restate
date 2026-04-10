@@ -104,6 +104,9 @@ pub enum Action {
         request_id: PartitionProcessorRpcRequestId,
         response: RestartAsNewInvocationResponse,
     },
+    ForwardAppendedResponse {
+        request_id: PartitionProcessorRpcRequestId,
+    },
 }
 
 impl From<VQueueEvent<EntryCard>> for Action {

@@ -239,6 +239,7 @@ mod tests {
             .apply(Command::NotifySignal(NotifySignalRequest {
                 invocation_id,
                 signal: signal.clone(),
+                request_id: None,
             }))
             .await;
         assert_that!(
@@ -285,6 +286,7 @@ mod tests {
             .apply(Command::NotifySignal(NotifySignalRequest {
                 invocation_id,
                 signal: signal.clone(),
+                request_id: None,
             }))
             .await;
         assert_that!(

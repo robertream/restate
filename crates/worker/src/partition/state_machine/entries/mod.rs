@@ -488,6 +488,7 @@ mod tests {
                     caller_completion_id: result_completion_id,
                 },
                 result: ResponseResult::Success(success_result.clone()),
+                request_id: None,
             }))
             .await;
         assert_that!(

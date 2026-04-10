@@ -199,6 +199,7 @@ mod tests {
                         result_completion_id,
                     ),
                     result: ResponseResult::Success(success_result.clone()),
+                    request_id: None,
                 }),
             ])
             .await;

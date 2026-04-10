@@ -17,6 +17,7 @@ pub mod fixtures;
 mod idempotency;
 mod kill_cancel;
 pub mod matchers;
+mod sim_storage;
 mod simulation;
 mod workflow;
 
@@ -380,6 +381,7 @@ async fn awakeable_completion_received_before_entry() -> TestResult {
         .apply(Command::InvocationResponse(InvocationResponse {
             target: JournalCompletionTarget::from_parts(invocation_id, 1),
             result: ResponseResult::Success(Bytes::default()),
+            request_id: None,
         }))
         .await;
 
@@ -437,6 +439,7 @@ async fn awakeable_completion_received_before_entry() -> TestResult {
         .apply(Command::InvocationResponse(InvocationResponse {
             target: JournalCompletionTarget::from_parts(invocation_id, 1),
             result: ResponseResult::Success(Bytes::default()),
+            request_id: None,
         }))
         .await;
     assert_that!(
@@ -915,6 +918,7 @@ async fn get_invocation_output_entry() {
         .apply(Command::InvocationResponse(InvocationResponse {
             target: JournalCompletionTarget::from_parts(invocation_id, 1),
             result: NOT_READY_INVOCATION_ERROR.into(),
+            request_id: None,
         }))
         .await;
     assert_that!(

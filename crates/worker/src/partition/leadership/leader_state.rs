@@ -649,6 +649,11 @@ impl LeaderState {
                     )));
                 }
             }
+            Action::ForwardAppendedResponse { request_id } => {
+                if let Some(response_tx) = self.awaiting_rpc_actions.remove(&request_id) {
+                    response_tx.send(Ok(PartitionProcessorRpcResponse::Appended));
+                }
+            }
             Action::VQEvent(inbox_event) => {
                 self.handle_vqueue_inbox_event(inbox_event, vqueues)?;
             }

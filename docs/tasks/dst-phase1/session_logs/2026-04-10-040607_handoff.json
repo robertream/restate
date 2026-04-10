@@ -1,0 +1,115 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-10-040607",
+  "branch_name": "dst-phase1",
+  "task_name": "dst-phase1",
+  "session_number": 3,
+  "continuity": {
+    "started": "2026-04-09",
+    "sessions_reviewed": 2,
+    "arc_goal": "Build Deterministic Simulation Testing (DST) infrastructure for Restate's partition processor targeting TigerBeetle VOPR / FoundationDB levels: Phase 1 (seed-based StateMachine::apply simulation), Phase 1.5 (in-memory SimStorage), Phase 2 (full PartitionProcessor with Bifrost), and fix issue #4566 (awakeable signal loss during leadership transitions) with proper TDD regression tests"
+  },
+  "progress_update": {
+    "summary": "Built complete DST Phase 1 + 1.5 infrastructure (1000-command seeded simulation test in 114ms, SimStorage with ~63 trait methods in ~920 lines), fixed issue #4566 with TDD regression test (migrated append_signal/append_invocation_response to handle_rpc_proposal_command), verified all tests pass and code is clean. Then conducted a rigorous VOPR review comparing current DST state against TigerBeetle's oracle-based approach, produced 10-gap ranked analysis (oracle/model #1, per-step invariants #2, entropy leaks #3, fault injection #4, crash/restart #5, workload expansion #6, multi-partition #7, liveness #8, determinism self-check #9, run_inner integration #10), and captured findings in durable research artifact with file:line evidence citations. Identified latent non-determinism bug (sim_storage.rs:83 HashMap should be BTreeMap). Code review of #4566 fix was interrupted in Session 2.",
+    "goal": "Build Deterministic Simulation Testing infrastructure (Phase 1-1.5) and establish roadmap to VOPR-equivalence, fix issue #4566 with proper regression testing, and create durable research artifacts for continuity",
+    "accomplished": [
+      "Phase 1: state_machine_simulation test — 1000 random commands via RocksDB TestEnv (114ms runtime)",
+      "Phase 1.5: SimStorage with ~63 trait methods implemented in ~920 lines, in-memory BTreeMap backend, state_machine_simulation_with_dedup test passing (64ms)",
+      "Fixed #4566: migrated append_signal + append_invocation_response to handle_rpc_proposal_command, added Action::ForwardAppendedResponse, added Option<request_id> fields with #[serde(default)] for WAL backward compatibility",
+      "TDD regression test at RPC handler level using MockActuator — verified test FAILS on buggy code, PASSES on fixed code",
+      "All 156 worker tests pass, cargo clippy clean, cargo fmt clean",
+      "Conducted rigorous VOPR review by analyzing simulation.rs (674 lines) and sim_storage.rs (986 lines) in full, grounded every claim in file:line citations",
+      "Produced 10-gap analysis ranked by bug-finding ROI: oracle/model #1, per-step invariants #2, entropy leaks #3, fault injection #4, crash/restart #5, workload expansion #6, multi-partition #7, liveness #8, determinism self-check #9, run_inner integration #10",
+      "Identified latent non-determinism: sim_storage.rs:83 HashMap<IdempotencyId,_> will break determinism if iterated — should be BTreeMap",
+      "Documented key insight: current sim is a panic-detector not a correctness-checker — needs SimModel oracle to catch non-panic correctness bugs",
+      "Wrote docs/tasks/dst-phase1/research/dst_vs_tigerbeetle_vopr_review_041026.md with ranked roadmap, architecture insights, and 5 open questions for future sessions"
+    ],
+    "now": "Review doc saved. 28 files uncommitted (DST Phase 1, DST Phase 1.5 + SimStorage, #4566 fix). Code review of #4566 fix interrupted in prior session. Ready to either (a) run spectre:reviewer on #4566 fix, (b) act on roadmap starting with SimModel oracle, or (c) run /spectre:sweep to commit all 3 chunks.",
+    "next_steps": [
+      "Decide next work unit: (a) run spectre:reviewer on #4566 fix (interrupted in Session 2), (b) implement #1 roadmap item (SimModel shadow state for InvocationId), or (c) run /spectre:sweep to commit DST Phase 1/1.5 + #4566 fix",
+      "If roadmap: start with SimModel tracking InvocationId → {status, signals_pending, has_response} and per-step invariant checks (low effort, high ROI)",
+      "Convert sim_storage.rs HashMap at line 83 to BTreeMap (trivial determinism fix, should land in current branch or next)",
+      "Consider adding same-seed-twice determinism self-test — low effort regression catch for future non-determinism",
+      "Review and possibly commit release notes for #4566 fix if release-notes/unreleased/ exists"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Review is grounded in evidence: every claim cites file:line from simulation.rs, sim_storage.rs, or prior research docs",
+      "No code was written in this session — analysis only, by design",
+      "WIP state is 28 files — review/commit cycle needed soon to avoid context loss",
+      "Roadmap ranking reflects bug-finding ROI, not implementation effort — some high-ROI items (SimModel) are cheap, others (run_inner) are expensive",
+      "All 22 Transaction sub-traits required for SimStorage — some methods (vqueue, budgeted reads) are unimplemented! stubs that will panic if hit",
+      "request_id field is Option<T> for backward WAL compatibility — old journal entries deserialize to None",
+      "Strategy A introduces latency: +5-20ms for local loglet, +50-100ms for replicated — acceptable per prior analysis",
+      "restart_as_new_invocation legacy path NOT migrated — intentionally deferred (deprecated in fleet upgrade past protocol V4)",
+      "append_invocation Appended mode NOT migrated — still uses self_propose_and_respond_asynchronously (orthogonal, deferred)",
+      "bilrost added as dev-dep to restate-worker for vqueue trait generic bounds",
+      "All tables are logical (2-byte KeyKind prefix) within single RocksDB CF per partition — no write amplification"
+    ],
+    "decisions": [
+      "Captured VOPR review as research doc (not memory/skill) — point-in-time artifact with file:line citations, belongs alongside deterministic_simulation_testing_040926.md",
+      "Ranked SimModel oracle as single highest-ROI next step — without it, workload expansion only improves panic-catching not correctness-catching",
+      "Framed entropy leaks as phase transition — Phase 1.5 tolerates them, Phase 2 cannot; fix must happen between phases not as part of Phase 2",
+      "Phase 1.5 tests dedup + state machine layer via SimStorage — does NOT include full run_inner loop (Phase 2 will use Bifrost::init_in_memory + PartitionProcessor)",
+      "DST dedup test validates dedup behavior (correct both before and after fix) — does NOT reproduce response-layer bug",
+      "Single Action::ForwardAppendedResponse variant rather than per-command variants — all affected sites return Appended response",
+      "Custom seed-based command generation over proptest — proptest shrinking doesn't work well for stateful sequences with RocksDB",
+      "SimStorage uses in-memory BTreeMap backend for fast Phase 1.5 testing — Phase 2 will use TestEnv with RocksDB"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Which path next: roadmap implementation (SimModel), interrupted code review, or /sweep to commit?",
+      "Should we start SimModel as part of this branch, or land DST Phase 1/1.5 + #4566 fix first and do SimModel on follow-up branch?",
+      "Is there appetite for integrating some roadmap items (determinism self-check, BTreeMap fix, randomized time advance) into current branch before merge?",
+      "Should append_invocation Appended mode also be migrated per Option A research? Deferred in Session 2.",
+      "Should we add symmetric regression test for append_invocation_response at RPC handler level?",
+      "Is there a release-notes/unreleased/ file that should be updated for #4566 fix?",
+      "Phase 2 approach: should we prioritize Bifrost::init_in_memory integration or LeaderState-level integration test first?"
+    ],
+    "risks": [
+      "WIP state is 28 files — risk of losing context if /sweep isn't run soon",
+      "Code review of #4566 fix was interrupted in Session 2 and never re-run — shipping without review adds risk",
+      "request_id field added to NotifySignalRequest/InvocationResponse — WAL serialization backward compat depends on serde_hacks intermediary correctly roundtripping Option<T> with #[serde(default)]",
+      "State machine only emits ForwardAppendedResponse when is_leader — correct to avoid flooding followers, but must verify no follower code path accidentally emits",
+      "MockActuator-based RPC handler test is unit-level — integration test at LeaderState level would increase confidence",
+      "SimStorage unimplemented! stubs for vqueue/budgeted reads — if future tests hit these, they will panic (acceptable for Phase 1, must be implemented for Phase 2)",
+      "Latent non-determinism bug (sim_storage.rs:83 HashMap) not yet fixed — should be converted to BTreeMap before shipping Phase 1.5",
+      "Research doc contains more nuance than verbal chat analysis — future sessions should treat file as canonical"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/tasks/dst-phase1/research/dst_vs_tigerbeetle_vopr_review_041026.md",
+      "docs/tasks/dst-phase1/research/deterministic_simulation_testing_040926.md",
+      "docs/tasks/dst-phase1/research/awakeable_signal_loss_issue_4566_040926.md",
+      "docs/tasks/dst-phase1/specs/plan.md",
+      "crates/worker/src/partition/state_machine/tests/simulation.rs",
+      "crates/worker/src/partition/state_machine/tests/sim_storage.rs",
+      "crates/worker/src/partition/state_machine/tests/mod.rs",
+      "crates/worker/src/partition/state_machine/actions.rs",
+      "crates/worker/src/partition/state_machine/mod.rs",
+      "crates/worker/src/partition/leadership/leader_state.rs",
+      "crates/worker/src/partition/rpc/append_signal.rs",
+      "crates/worker/src/partition/rpc/append_invocation_response.rs",
+      "crates/worker/src/partition/rpc/mod.rs",
+      "crates/types/src/invocation/mod.rs",
+      "crates/storage-api/src/protobuf_types.rs",
+      "crates/worker/Cargo.toml",
+      "Cargo.lock"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "git log -1 --format='%H %h' HEAD",
+      "git rev-parse --abbrev-ref HEAD",
+      "ls docs/tasks/dst-phase1/",
+      "cargo nextest run -p restate-worker --all-features",
+      "cargo clippy -p restate-worker --all-features --all-targets -- -D warnings",
+      "cargo fmt --all -- --check"
+    ]
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "774d17c8c",
+    "session_arc": "Session 1 (04-09-095930): researched DST + #4566, got plan reviewed. Session 2 (04-10-033741): implemented DST Phase 1/1.5 + #4566 fix, code review interrupted. Session 3 (04-10-040607, current): VOPR review + gap analysis, documented findings, identified HashMap determinism bug."
+  }
+}

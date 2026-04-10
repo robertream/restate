@@ -102,6 +102,7 @@ where
                 .send_invocation_response(InvocationResponse {
                     target: JournalCompletionTarget::for_v3_completions(invocation_id, entry_index),
                     result,
+                    request_id: None,
                 })
                 .await
         };

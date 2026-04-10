@@ -3309,7 +3309,7 @@ pub mod v1 {
             for outbox_message::OutboxServiceInvocationResponse
         {
             fn from(value: restate_types::invocation::InvocationResponse) -> Self {
-                let restate_types::invocation::InvocationResponse { target, result } = value;
+                let restate_types::invocation::InvocationResponse { target, result, .. } = value;
 
                 OutboxServiceInvocationResponse {
                     entry_index: target.caller_completion_id,
@@ -3343,6 +3343,7 @@ pub mod v1 {
                     result: restate_types::invocation::ResponseResult::try_from(
                         response_result.ok_or(ConversionError::missing_field("response_result"))?,
                     )?,
+                    request_id: None,
                 })
             }
         }
@@ -3352,6 +3353,7 @@ pub mod v1 {
                 let restate_types::invocation::NotifySignalRequest {
                     invocation_id,
                     signal,
+                    ..
                 } = value;
 
                 Self {
@@ -3428,6 +3430,7 @@ pub mod v1 {
                             }),
                         },
                     ),
+                    request_id: None,
                 })
             }
         }

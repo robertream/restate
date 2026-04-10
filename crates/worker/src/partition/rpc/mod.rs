@@ -250,6 +250,7 @@ where
             PartitionProcessorRpcRequestInner::AppendInvocationResponse(invocation_response) => {
                 self.handle(
                     append_invocation_response::Request {
+                        request_id,
                         invocation_response,
                     },
                     replier,
@@ -259,6 +260,7 @@ where
             PartitionProcessorRpcRequestInner::AppendSignal(invocation_id, signal) => {
                 self.handle(
                     append_signal::Request {
+                        request_id,
                         invocation_id,
                         signal,
                     },

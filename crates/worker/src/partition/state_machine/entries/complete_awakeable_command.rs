@@ -52,6 +52,7 @@ where
                             CompleteAwakeableResult::Failure(f) => SignalResult::Failure(f),
                         },
                     ),
+                    request_id: None,
                 })
             }
         })?;

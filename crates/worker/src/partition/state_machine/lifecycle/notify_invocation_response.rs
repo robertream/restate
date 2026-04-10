@@ -201,6 +201,7 @@ mod tests {
                         result_completion_id,
                     ),
                     result: ResponseResult::Failure(expected_failure.clone()),
+                    request_id: None,
                 }),
             ])
             .await;

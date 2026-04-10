@@ -182,6 +182,7 @@ mod tests {
             .apply(Command::NotifySignal(NotifySignalRequest {
                 invocation_id,
                 signal: CANCEL_SIGNAL.try_into().unwrap(),
+                request_id: None,
             }))
             .await;
         assert_that!(
@@ -207,6 +208,7 @@ mod tests {
             .apply(Command::NotifySignal(NotifySignalRequest {
                 invocation_id,
                 signal: CANCEL_SIGNAL.try_into().unwrap(),
+                request_id: None,
             }))
             .await;
         assert_that!(
@@ -251,6 +253,7 @@ mod tests {
             .apply(Command::NotifySignal(NotifySignalRequest {
                 invocation_id,
                 signal: CANCEL_SIGNAL.try_into().unwrap(),
+                request_id: None,
             }))
             .await;
         assert_that!(
@@ -313,6 +316,7 @@ mod tests {
             .apply(Command::NotifySignal(NotifySignalRequest {
                 invocation_id,
                 signal: CANCEL_SIGNAL.try_into().unwrap(),
+                request_id: None,
             }))
             .await;
         assert_that!(
@@ -412,6 +416,7 @@ mod tests {
             .apply(Command::NotifySignal(NotifySignalRequest {
                 invocation_id: inboxed_id,
                 signal: CANCEL_SIGNAL.try_into().unwrap(),
+                request_id: None,
             }))
             .await;
 
