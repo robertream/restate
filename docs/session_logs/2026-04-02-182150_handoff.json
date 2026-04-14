@@ -1,0 +1,81 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-02-182150",
+  "branch_name": "service-macro",
+  "task_name": "service-macro",
+  "session_number": 8,
+  "continuity": {
+    "started": "2026-03-19",
+    "sessions_reviewed": 3,
+    "arc_goal": "Build the Linked Workflows MVP — a durable, observable computation graph where workflows can link to other workflows, with parent completion gated on linked children completion. Sessions 1-3 built SSE infrastructure (StateRouter, repartition, state change detection). Session 4 pivoted to vision (OTP comparison, original RFC). Session 5 critiqued and refined (edges vs channels, four-node taxonomy). Session 6-7 completed the State Graph RFC with concrete execution semantics. Session 8 (this) designed the Linked Workflows MVP end-to-end, establishing journal-driven links, a separate links table as the durable record, and the returning state lifecycle."
+  },
+  "progress_update": {
+    "summary": "Designed the Linked Workflows MVP end-to-end. Started with a plan review of the State Graph RFC, refined it (added workflow handlers, graph introspection, clarified cancel vs removeLink), then dove into implementation planning. Through iterative discussion, we arrived at a clean design: links are journal-driven (reusing Call completion routing), stored in a separate links table (promise table pattern), with the links table as the durable record that outlives invocation purges. The key insight: linked spawn = Call-like journal entry that doesn't suspend the parent, and parent completion is blocked until all linked children complete.",
+    "goal": "Design and implement the Linked Workflows MVP — workflow→workflow links with journal-driven mechanics, a separate links table for observable computation graphs, and a returning→completed lifecycle where parent completion is gated on linked children.",
+    "accomplished": [
+      "Refined the State Graph RFC: added exclusive/shared workflow handlers, graph introspection from completion value, clarified cancel vs removeLink, simplified completion handlers, tightened mutability contracts",
+      "Deferred exclusive handler write access to future work — workflow state is run-only for writes, readable via shared handlers and SSE",
+      "Designed linked workflow mechanics: links are journal-driven (reuse Call completion routing), links table stores graph topology and child results directly",
+      "Established storage model: links table is the durable record, invocations point to links (not reverse), links outlive invocation purges, durability rooted at object ancestors",
+      "Wrote design document at docs/design/linked_workflows_mvp.md capturing all decisions in bullet-point format",
+      "Wrote detailed implementation plan covering links table (storage-api + partition-store), protobuf, types, spawn-with-link, returning state, child completion handling, and end-to-end test"
+    ],
+    "now": "Design document written, implementation plan approved. Ready to begin coding the links table and state machine changes.",
+    "next_steps": [
+      "Implement links table following promise table pattern (storage-api traits + partition-store impl + protobuf)",
+      "Add LinkUpdate response sink variant and UpdateLinkStatus outbox/command types",
+      "Modify call_commands.rs for spawn-with-link and end_invocation for returning state",
+      "Write the end-to-end test: linked_child_blocks_parent_completion"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Focus on semantics first, implementation details later",
+      "MVP is workflow→workflow only, object→workflow links come next",
+      "No SSE/ego graph streaming in MVP — links table is the foundation",
+      "Cross-partition links deferred — start intra-partition"
+    ],
+    "decisions": [
+      "Links are journal-driven — reuse existing Call completion routing, not a separate notification mechanism",
+      "Links table (separate, promise table pattern) stores graph topology AND child results directly — the durable record",
+      "Invocations point to links (invocation → links), not reverse — links outlive invocation purges",
+      "Durability rooted at virtual object ancestors — workflow-only trees are transient",
+      "Parent can await a linked child like a Call future without removing the link",
+      "Deferred exclusive handler write access — workflow state is run-only for MVP",
+      "Workflow state freezes on completion (both success and failure), result is separate return value",
+      "Completion handlers optional for flow control, shared ownership with ref-counted GC",
+      "Observable state is first-class in the model — computations graphs are data products"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Exact journal entry type for linked spawn — new type or flag on OneWayCall?",
+      "Pending completion storage — special key in links table or separate entry?",
+      "How AwaitLink interacts with the returning state — does awaiting a link count as the parent still running?"
+    ],
+    "risks": [
+      "Cross-partition links deferred but common case for cross-service links",
+      "Implementation may reveal edge cases in returning state that require design adjustments"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/rfcs/rfc_state_graph_and_links_033126.md",
+      "docs/design/linked_workflows_mvp.md",
+      "crates/storage-api/src/promise_table/mod.rs",
+      "crates/partition-store/src/promise_table/mod.rs",
+      "crates/worker/src/partition/state_machine/mod.rs",
+      "crates/worker/src/partition/state_machine/entries/call_commands.rs",
+      "crates/worker/src/partition/state_machine/tests/workflow.rs",
+      "crates/types/src/invocation/mod.rs",
+      "crates/storage-api/src/outbox_table/mod.rs",
+      "crates/wal-protocol/src/lib.rs"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "cargo nextest run --all-features -p restate-worker start_workflow_method"
+    ]
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "b1766c03b"
+  }
+}

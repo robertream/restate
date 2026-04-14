@@ -99,6 +99,8 @@ fn invoked_status(invocation_target: InvocationTarget) -> InvocationStatus {
         idempotency_key: None,
         hotfix_apply_cancellation_after_deployment_is_pinned: false,
         random_seed: None,
+        linked_from_count: 0,
+        linked_to_count: 0,
     })
 }
 
@@ -127,6 +129,8 @@ fn suspended_status(invocation_target: InvocationTarget) -> InvocationStatus {
             idempotency_key: None,
             hotfix_apply_cancellation_after_deployment_is_pinned: false,
             random_seed: None,
+            linked_from_count: 0,
+            linked_to_count: 0,
         },
         awaiting_on: UnresolvedFuture::Unknown(Vec::default()),
     }

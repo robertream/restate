@@ -12,6 +12,9 @@ use crate::partition::state_machine::entries::OnJournalEntryCommand;
 use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext};
 use restate_storage_api::fsm_table::WriteFsmTable;
 use restate_storage_api::inbox_table::WriteInboxTable;
+use restate_storage_api::invocation_edges_table::{
+    ReadInvocationEdgesTable, WriteInvocationEdgesTable,
+};
 use restate_storage_api::invocation_status_table::{
     InvocationStatus, ReadInvocationStatusTable, WriteInvocationStatusTable,
 };
@@ -21,6 +24,10 @@ use restate_storage_api::journal_table_v2::{ReadJournalTable, WriteJournalTable}
 use restate_storage_api::lock_table::WriteLockTable;
 use restate_storage_api::outbox_table::WriteOutboxTable;
 use restate_storage_api::promise_table::{ReadPromiseTable, WritePromiseTable};
+use restate_storage_api::service_edges_table::{ReadServiceEdgesTable, WriteServiceEdgesTable};
+use restate_storage_api::service_status_table::{
+    ReadVirtualObjectStatusTable, WriteVirtualObjectStatusTable,
+};
 use restate_storage_api::state_table::{ReadStateTable, WriteStateTable};
 use restate_storage_api::timer_table::WriteTimerTable;
 use restate_storage_api::vqueue_table::{ReadVQueueTable, WriteVQueueTable};
@@ -56,7 +63,13 @@ where
         + ReadVQueueTable
         + WriteVQueueTable
         + WriteLockTable
-        + WritePromiseTable,
+        + WritePromiseTable
+        + ReadServiceEdgesTable
+        + WriteServiceEdgesTable
+        + ReadInvocationEdgesTable
+        + WriteInvocationEdgesTable
+        + ReadVirtualObjectStatusTable
+        + WriteVirtualObjectStatusTable,
 {
     async fn apply(self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
         match self.invocation_status {
@@ -84,6 +97,15 @@ where
                     scheduled,
                 )
                 .await?;
+                ctx.reply_to_cancel(self.response_sink, CancelInvocationResponse::Done);
+            }
+            InvocationStatus::Completing(completing) => {
+                debug!(
+                    "Force-completing invocation '{}' that was waiting for linked children (cancel)",
+                    self.invocation_id
+                );
+                ctx.resume_completing_invocation(self.invocation_id, completing)
+                    .await?;
                 ctx.reply_to_cancel(self.response_sink, CancelInvocationResponse::Done);
             }
             InvocationStatus::Completed(_) => {

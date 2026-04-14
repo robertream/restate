@@ -34,6 +34,12 @@ message TransientErrorEvent {
     ATTACH_INVOCATION = 17;
     GET_INVOCATION_OUTPUT = 18;
     COMPLETE_AWAKEABLE = 19;
+    LINK_SERVICE = 20;
+    UNLINK_SERVICE = 21;
+    COMPLETE_SERVICE = 22;
+    START_LINKED = 23;
+    UNLINK_INVOCATION = 24;
+    ATTACH_SERVICE = 25;
   }
 
   uint32 error_code = 1;

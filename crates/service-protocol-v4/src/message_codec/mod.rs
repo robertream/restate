@@ -380,6 +380,23 @@ gen_message!(
 
     CompleteAwakeable Command noparse allows_ack = 0x0414,
 
+    LinkService Command noparse allows_ack = 0x0415,
+    LinkService CompletionNotification noparse = 0x8015,
+    CompleteService Command noparse allows_ack = 0x0416,
+    CompleteService CompletionNotification noparse = 0x8016,
+
+    UnlinkService Command noparse allows_ack = 0x0417,
+    UnlinkService CompletionNotification noparse = 0x8017,
+
+    StartLinked Command allows_ack = 0x0418,
+    StartLinked CompletionNotification noparse = 0x8018,
+
+    UnlinkInvocation Command noparse allows_ack = 0x0419,
+    UnlinkInvocation CompletionNotification noparse = 0x8019,
+
+    AttachService Command noparse allows_ack = 0x041C,
+    AttachService CompletionNotification noparse = 0x801C,
+
     Signal Notification noparse = 0xFBFF,
 );
 

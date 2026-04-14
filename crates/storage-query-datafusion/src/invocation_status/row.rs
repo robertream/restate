@@ -258,7 +258,12 @@ pub(crate) fn append_invocation_status_row<'a>(
                 }
             }
         }
-        Status::UnknownStatus => return Err(ConversionError::invalid_data_static("status")),
+        Status::Completing => {
+            row.status("completing");
+            fill_journal_metadata(&mut row, invocation_status)?;
+            fill_in_flight_invocation_metadata(&mut row, invocation_status)?;
+        }
+        Status::UnknownStatus => return Err(ConversionError::invalid_data("status")),
     };
 
     Ok(())

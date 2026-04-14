@@ -204,6 +204,11 @@ pub fn decode_value(key_kind: KeyKind, key: &[u8], value: &[u8]) -> DecodedValue
 
         // FSM table - decode based on state_id from key
         KeyKind::Fsm => decode_fsm_value(key, value),
+
+        // ServiceEdges / InvocationEdges: edge values encoded as EdgeState proto
+        KeyKind::ServiceEdges | KeyKind::InvocationEdges => {
+            decode_protobuf::<restate_types::invocation::EdgeState>(value)
+        }
     }
 }
 

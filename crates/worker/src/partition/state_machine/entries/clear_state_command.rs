@@ -8,19 +8,24 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use tracing::warn;
+
+use restate_storage_api::service_status_table::{
+    ReadVirtualObjectStatusTable, VirtualObjectStatus,
+};
+use restate_storage_api::state_table::WriteStateTable;
+use restate_types::journal_v2::{ClearStateCommand, EntryMetadata};
+
 use crate::debug_if_leader;
 use crate::partition::state_machine::entries::ApplyJournalCommandEffect;
 use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext};
-use restate_storage_api::state_table::WriteStateTable;
-use restate_types::journal_v2::{ClearStateCommand, EntryMetadata};
-use tracing::warn;
 
 pub(super) type ApplyClearStateCommand<'e> = ApplyJournalCommandEffect<'e, ClearStateCommand>;
 
 impl<'e, 'ctx: 'e, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
     for ApplyClearStateCommand<'e>
 where
-    S: WriteStateTable,
+    S: WriteStateTable + ReadVirtualObjectStatusTable,
 {
     async fn apply(self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
         let invocation_metadata = self
@@ -29,6 +34,16 @@ where
             .expect("In-Flight invocation metadata must be present");
 
         if let Some(service_id) = invocation_metadata.invocation_target.as_keyed_service_id() {
+            // Reject state mutations if the object has already completed
+            let status = ctx.storage.get_virtual_object_status(&service_id).await?;
+            if matches!(status, VirtualObjectStatus::Completed { .. }) {
+                warn!(
+                    "Rejecting ClearState for completed service object {}",
+                    service_id
+                );
+                return Ok(());
+            }
+
             debug_if_leader!(
                 ctx.is_leader,
                 restate.state.key = ?self.entry.key,

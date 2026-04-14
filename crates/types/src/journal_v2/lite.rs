@@ -53,6 +53,12 @@ pub enum CommandLite {
     AttachInvocation(AttachInvocationCommandLite),
     GetInvocationOutput(GetInvocationOutputCommandLite),
     CompleteAwakeable(CompleteAwakeableCommandLite),
+    LinkService(LinkServiceCommandLite),
+    UnlinkService(UnlinkServiceCommandLite),
+    UnlinkInvocation(UnlinkInvocationCommandLite),
+    CompleteService(CompleteServiceCommandLite),
+    StartLinked(StartLinkedCommandLite),
+    AttachService(AttachServiceCommandLite),
 }
 
 // Little macro to reduce boilerplate for TryFromEntry and EntryMetadata.
@@ -247,6 +253,42 @@ pub enum CompleteAwakeableResultLite {
     Failure,
 }
 impl_command_accessors!(CompleteAwakeable);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinkServiceCommandLite {
+    pub completion_id: CompletionId,
+}
+impl_command_accessors!(LinkService);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnlinkServiceCommandLite {
+    pub completion_id: CompletionId,
+}
+impl_command_accessors!(UnlinkService);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnlinkInvocationCommandLite {
+    pub completion_id: CompletionId,
+}
+impl_command_accessors!(UnlinkInvocation);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CompleteServiceCommandLite {
+    pub completion_id: CompletionId,
+}
+impl_command_accessors!(CompleteService);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StartLinkedCommandLite {
+    pub completion_id: CompletionId,
+}
+impl_command_accessors!(StartLinked);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AttachServiceCommandLite {
+    pub completion_id: CompletionId,
+}
+impl_command_accessors!(AttachService);
 
 // --- Notification lite
 

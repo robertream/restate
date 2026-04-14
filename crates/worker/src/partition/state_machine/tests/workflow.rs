@@ -55,7 +55,7 @@ async fn start_workflow_method() {
             .get_virtual_object_status(&invocation_target.as_keyed_service_id().unwrap())
             .await
             .unwrap(),
-        eq(VirtualObjectStatus::Unlocked)
+        eq(VirtualObjectStatus::unlocked())
     );
 
     // Sending another invocation won't re-execute
@@ -323,6 +323,11 @@ async fn purge_completed_workflow() {
         }),
     )
     .unwrap();
+    txn.put_virtual_object_status(
+        &invocation_target.as_keyed_service_id().unwrap(),
+        &VirtualObjectStatus::locked(invocation_id),
+    )
+    .unwrap();
     txn.commit().await.unwrap();
     drop(txn);
 
@@ -351,6 +356,14 @@ async fn purge_completed_workflow() {
             .await
             .unwrap(),
         pat!(InvocationStatus::Free)
+    );
+    assert_that!(
+        test_env
+            .storage()
+            .get_virtual_object_status(&invocation_target.as_keyed_service_id().unwrap())
+            .await
+            .unwrap(),
+        pat!(VirtualObjectStatus::Unlocked { .. })
     );
     test_env.shutdown().await;
 }

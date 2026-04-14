@@ -150,6 +150,10 @@ pub enum InvocationStatus {
         awaiting_on: UnresolvedFuture,
     },
     Paused(InFlightInvocationMetadata),
+    /// Stored when a workflow invocation's `run` handler returns while linked children are still
+    /// active. The invocation waits in this state until all children complete, then transitions
+    /// to `Completed`/`Free`.
+    Completing(CompletingInvocation),
     Completed(CompletedInvocation),
     /// Service instance is currently not invoked
     #[default]
@@ -169,8 +173,9 @@ impl InvocationStatus {
             InvocationStatus::Invoked(metadata)
             | InvocationStatus::Suspended { metadata, .. }
             | InvocationStatus::Paused(metadata) => Some(&metadata.invocation_target),
+            InvocationStatus::Completing(completing) => Some(&completing.invocation_target),
             InvocationStatus::Completed(completed) => Some(&completed.invocation_target),
-            _ => None,
+            InvocationStatus::Free => None,
         }
     }
 
@@ -182,8 +187,9 @@ impl InvocationStatus {
             InvocationStatus::Invoked(metadata)
             | InvocationStatus::Suspended { metadata, .. }
             | InvocationStatus::Paused(metadata) => Some(&metadata.source),
+            InvocationStatus::Completing(completing) => Some(&completing.source),
             InvocationStatus::Completed(completed) => Some(&completed.source),
-            _ => None,
+            InvocationStatus::Free => None,
         }
     }
 
@@ -192,7 +198,12 @@ impl InvocationStatus {
         match self {
             InvocationStatus::Scheduled(metadata) => metadata.metadata.execution_time,
             InvocationStatus::Inboxed(metadata) => metadata.metadata.execution_time,
-            _ => None,
+            InvocationStatus::Invoked(_)
+            | InvocationStatus::Suspended { .. }
+            | InvocationStatus::Paused(_)
+            | InvocationStatus::Completing(_)
+            | InvocationStatus::Completed(_)
+            | InvocationStatus::Free => None,
         }
     }
 
@@ -204,8 +215,9 @@ impl InvocationStatus {
             InvocationStatus::Invoked(metadata)
             | InvocationStatus::Suspended { metadata, .. }
             | InvocationStatus::Paused(metadata) => metadata.idempotency_key.as_ref(),
+            InvocationStatus::Completing(completing) => completing.idempotency_key.as_ref(),
             InvocationStatus::Completed(completed) => completed.idempotency_key.as_ref(),
-            _ => None,
+            InvocationStatus::Free => None,
         }
     }
 
@@ -224,11 +236,16 @@ impl InvocationStatus {
             }
             | InvocationStatus::Paused(InFlightInvocationMetadata {
                 journal_metadata, ..
-            })
-            | InvocationStatus::Completed(CompletedInvocation {
+            }) => Some(journal_metadata),
+            InvocationStatus::Completing(CompletingInvocation {
                 journal_metadata, ..
             }) => Some(journal_metadata),
-            _ => None,
+            InvocationStatus::Completed(CompletedInvocation {
+                journal_metadata, ..
+            }) => Some(journal_metadata),
+            InvocationStatus::Scheduled(_)
+            | InvocationStatus::Inboxed(_)
+            | InvocationStatus::Free => None,
         }
     }
 
@@ -247,11 +264,16 @@ impl InvocationStatus {
             }
             | InvocationStatus::Paused(InFlightInvocationMetadata {
                 journal_metadata, ..
-            })
-            | InvocationStatus::Completed(CompletedInvocation {
+            }) => Some(journal_metadata),
+            InvocationStatus::Completing(CompletingInvocation {
                 journal_metadata, ..
             }) => Some(journal_metadata),
-            _ => None,
+            InvocationStatus::Completed(CompletedInvocation {
+                journal_metadata, ..
+            }) => Some(journal_metadata),
+            InvocationStatus::Scheduled(_)
+            | InvocationStatus::Inboxed(_)
+            | InvocationStatus::Free => None,
         }
     }
 
@@ -270,11 +292,16 @@ impl InvocationStatus {
             }
             | InvocationStatus::Paused(InFlightInvocationMetadata {
                 journal_metadata, ..
-            })
-            | InvocationStatus::Completed(CompletedInvocation {
+            }) => Some(journal_metadata),
+            InvocationStatus::Completing(CompletingInvocation {
                 journal_metadata, ..
             }) => Some(journal_metadata),
-            _ => None,
+            InvocationStatus::Completed(CompletedInvocation {
+                journal_metadata, ..
+            }) => Some(journal_metadata),
+            InvocationStatus::Scheduled(_)
+            | InvocationStatus::Inboxed(_)
+            | InvocationStatus::Free => None,
         }
     }
 
@@ -298,6 +325,10 @@ impl InvocationStatus {
         }
     }
 
+    /// Returns a mutable reference to the in-flight invocation metadata, if available.
+    ///
+    /// Note: `Completing` is intentionally excluded — it stores `CompletingInvocation`
+    /// (not `InFlightInvocationMetadata`) and has already left the in-flight lifecycle.
     #[inline]
     pub fn get_invocation_metadata_mut(&mut self) -> Option<&mut InFlightInvocationMetadata> {
         match self {
@@ -318,7 +349,8 @@ impl InvocationStatus {
             InvocationStatus::Invoked(metadata)
             | InvocationStatus::Suspended { metadata, .. }
             | InvocationStatus::Paused(metadata) => Some(&mut metadata.response_sinks),
-            _ => None,
+            InvocationStatus::Completing(completing) => Some(&mut completing.response_sinks),
+            InvocationStatus::Completed(_) | InvocationStatus::Free => None,
         }
     }
 
@@ -330,7 +362,72 @@ impl InvocationStatus {
             InvocationStatus::Invoked(metadata)
             | InvocationStatus::Suspended { metadata, .. }
             | InvocationStatus::Paused(metadata) => Some(&metadata.response_sinks),
-            _ => None,
+            InvocationStatus::Completing(completing) => Some(&completing.response_sinks),
+            InvocationStatus::Completed(_) | InvocationStatus::Free => None,
+        }
+    }
+
+    /// Returns the linked_from_count for variants that track linked parents.
+    /// Returns `None` for `Scheduled`, `Inboxed`, `Free` (pre-flight invocations can't be linked to).
+    #[inline]
+    pub fn linked_from_count(&self) -> Option<u32> {
+        match self {
+            InvocationStatus::Invoked(metadata)
+            | InvocationStatus::Suspended { metadata, .. }
+            | InvocationStatus::Paused(metadata) => Some(metadata.linked_from_count),
+            InvocationStatus::Completing(completing) => Some(completing.linked_from_count),
+            InvocationStatus::Completed(completed) => Some(completed.linked_from_count),
+            InvocationStatus::Scheduled(_)
+            | InvocationStatus::Inboxed(_)
+            | InvocationStatus::Free => None,
+        }
+    }
+
+    /// Returns a mutable reference to linked_from_count for in-flight variants.
+    /// Returns `None` for `Scheduled`, `Inboxed`, `Completed`, `Free`.
+    #[inline]
+    pub fn linked_from_count_mut(&mut self) -> Option<&mut u32> {
+        match self {
+            InvocationStatus::Invoked(metadata)
+            | InvocationStatus::Suspended { metadata, .. }
+            | InvocationStatus::Paused(metadata) => Some(&mut metadata.linked_from_count),
+            InvocationStatus::Completing(completing) => Some(&mut completing.linked_from_count),
+            InvocationStatus::Completed(_)
+            | InvocationStatus::Scheduled(_)
+            | InvocationStatus::Inboxed(_)
+            | InvocationStatus::Free => None,
+        }
+    }
+
+    /// Returns the linked_to_count for variants that track active children.
+    /// Returns `None` for `Scheduled`, `Inboxed`, `Free`.
+    #[inline]
+    pub fn linked_to_count(&self) -> Option<u32> {
+        match self {
+            InvocationStatus::Invoked(metadata)
+            | InvocationStatus::Suspended { metadata, .. }
+            | InvocationStatus::Paused(metadata) => Some(metadata.linked_to_count),
+            InvocationStatus::Completing(completing) => Some(completing.linked_to_count),
+            InvocationStatus::Completed(completed) => Some(completed.linked_to_count),
+            InvocationStatus::Scheduled(_)
+            | InvocationStatus::Inboxed(_)
+            | InvocationStatus::Free => None,
+        }
+    }
+
+    /// Returns a mutable reference to linked_to_count for in-flight variants.
+    /// Returns `None` for `Scheduled`, `Inboxed`, `Completed`, `Free`.
+    #[inline]
+    pub fn linked_to_count_mut(&mut self) -> Option<&mut u32> {
+        match self {
+            InvocationStatus::Invoked(metadata)
+            | InvocationStatus::Suspended { metadata, .. }
+            | InvocationStatus::Paused(metadata) => Some(&mut metadata.linked_to_count),
+            InvocationStatus::Completing(completing) => Some(&mut completing.linked_to_count),
+            InvocationStatus::Completed(_)
+            | InvocationStatus::Scheduled(_)
+            | InvocationStatus::Inboxed(_)
+            | InvocationStatus::Free => None,
         }
     }
 
@@ -342,8 +439,9 @@ impl InvocationStatus {
             InvocationStatus::Invoked(metadata)
             | InvocationStatus::Suspended { metadata, .. }
             | InvocationStatus::Paused(metadata) => Some(&metadata.timestamps),
+            InvocationStatus::Completing(completing) => Some(&completing.timestamps),
             InvocationStatus::Completed(completed) => Some(&completed.timestamps),
-            _ => None,
+            InvocationStatus::Free => None,
         }
     }
 
@@ -355,8 +453,9 @@ impl InvocationStatus {
             InvocationStatus::Invoked(metadata)
             | InvocationStatus::Suspended { metadata, .. }
             | InvocationStatus::Paused(metadata) => Some(&mut metadata.timestamps),
+            InvocationStatus::Completing(completing) => Some(&mut completing.timestamps),
             InvocationStatus::Completed(completed) => Some(&mut completed.timestamps),
-            _ => None,
+            InvocationStatus::Free => None,
         }
     }
 
@@ -368,6 +467,7 @@ impl InvocationStatus {
             InvocationStatus::Invoked(metadata)
             | InvocationStatus::Suspended { metadata, .. }
             | InvocationStatus::Paused(metadata) => metadata.random_seed,
+            InvocationStatus::Completing(completing) => completing.random_seed,
             InvocationStatus::Completed(completed) => completed.random_seed,
             InvocationStatus::Free => None,
         }
@@ -381,6 +481,7 @@ impl InvocationStatus {
             InvocationStatus::Invoked(_) => Some(InvocationStatusDiscriminants::Invoked),
             InvocationStatus::Suspended { .. } => Some(InvocationStatusDiscriminants::Suspended),
             InvocationStatus::Paused(_) => Some(InvocationStatusDiscriminants::Paused),
+            InvocationStatus::Completing(_) => Some(InvocationStatusDiscriminants::Completing),
             InvocationStatus::Completed(_) => Some(InvocationStatusDiscriminants::Completed),
             InvocationStatus::Free => None,
         }
@@ -395,6 +496,7 @@ pub enum InvocationStatusDiscriminants {
     Suspended,
     Paused,
     Killed,
+    Completing,
     Completed,
 }
 
@@ -621,6 +723,14 @@ pub struct InFlightInvocationMetadata {
     ///
     /// When None, infer the seed from the invocation id.
     pub random_seed: Option<u64>,
+
+    /// Number of linked parents referencing this invocation. Incremented when a parent
+    /// links via `LinkServiceCommand`/`StartLinkedCommand`, decremented on unlink.
+    pub linked_from_count: u32,
+
+    /// Number of active LinkedTo children this invocation has linked to. Incremented when
+    /// this invocation links a child, decremented on child completion or unlink.
+    pub linked_to_count: u32,
 }
 
 impl InFlightInvocationMetadata {
@@ -657,6 +767,8 @@ impl InFlightInvocationMetadata {
                     idempotency_key: pre_flight_invocation_metadata.idempotency_key,
                     hotfix_apply_cancellation_after_deployment_is_pinned: false,
                     random_seed: pre_flight_invocation_metadata.random_seed,
+                    linked_from_count: 0,
+                    linked_to_count: 0,
                 },
                 Some(InvocationInput { argument, headers }),
             ),
@@ -683,6 +795,8 @@ impl InFlightInvocationMetadata {
                     idempotency_key: pre_flight_invocation_metadata.idempotency_key,
                     hotfix_apply_cancellation_after_deployment_is_pinned: false,
                     random_seed: pre_flight_invocation_metadata.random_seed,
+                    linked_from_count: 0,
+                    linked_to_count: 0,
                 },
                 None,
             ),
@@ -707,6 +821,61 @@ impl InFlightInvocationMetadata {
         );
         self.pinned_deployment = Some(pinned_deployment);
         self.timestamps.update(timestamp);
+    }
+}
+
+/// Stored when a workflow invocation's `run` handler returns while linked children are still
+/// active. The invocation waits in this state until all children complete, then transitions
+/// to `Completed`/`Free`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletingInvocation {
+    pub invocation_target: InvocationTarget,
+    /// Restate version the invocation was created with.
+    pub created_using_restate_version: RestateVersion,
+    pub journal_metadata: JournalMetadata,
+    pub pinned_deployment: Option<PinnedDeployment>,
+    pub response_sinks: HashSet<ServiceInvocationResponseSink>,
+    pub timestamps: StatusTimestamps,
+    pub source: Source,
+    /// For invocations that were originally scheduled, retains the time when the request was originally scheduled to execute
+    pub execution_time: Option<MillisSinceEpoch>,
+    /// If zero, the invocation completion will not be retained.
+    pub completion_retention_duration: Duration,
+    /// If zero, the journal will not be retained.
+    pub journal_retention_duration: Duration,
+    pub idempotency_key: Option<ByteString>,
+    pub random_seed: Option<u64>,
+    /// The stored result from when the workflow's run handler returned.
+    pub response_result: ResponseResult,
+    /// Number of linked parents referencing this invocation. Copied from
+    /// `InFlightInvocationMetadata::linked_from_count`.
+    pub linked_from_count: u32,
+    /// Number of active LinkedTo children. Copied from `InFlightInvocationMetadata::linked_to_count`.
+    pub linked_to_count: u32,
+}
+
+impl CompletingInvocation {
+    pub fn from_in_flight_invocation_metadata(
+        metadata: InFlightInvocationMetadata,
+        response_result: ResponseResult,
+    ) -> Self {
+        Self {
+            invocation_target: metadata.invocation_target,
+            created_using_restate_version: metadata.created_using_restate_version,
+            journal_metadata: metadata.journal_metadata,
+            pinned_deployment: metadata.pinned_deployment,
+            response_sinks: metadata.response_sinks,
+            timestamps: metadata.timestamps,
+            source: metadata.source,
+            execution_time: metadata.execution_time,
+            completion_retention_duration: metadata.completion_retention_duration,
+            journal_retention_duration: metadata.journal_retention_duration,
+            idempotency_key: metadata.idempotency_key,
+            random_seed: metadata.random_seed,
+            response_result,
+            linked_from_count: metadata.linked_from_count,
+            linked_to_count: metadata.linked_to_count,
+        }
     }
 }
 
@@ -740,6 +909,11 @@ pub struct CompletedInvocation {
     ///
     /// When None, infer the seed from the invocation id.
     pub random_seed: Option<u64>,
+
+    /// Number of linked parents referencing this invocation.
+    pub linked_from_count: u32,
+    /// Number of active LinkedTo children. Copied from the in-flight metadata at completion time.
+    pub linked_to_count: u32,
 }
 
 #[derive(PartialEq, Eq)]
@@ -780,6 +954,39 @@ impl CompletedInvocation {
             },
             pinned_deployment: in_flight_invocation_metadata.pinned_deployment,
             random_seed: in_flight_invocation_metadata.random_seed,
+            linked_from_count: in_flight_invocation_metadata.linked_from_count,
+            linked_to_count: in_flight_invocation_metadata.linked_to_count,
+        }
+    }
+
+    pub fn from_completing_invocation(
+        mut completing: CompletingInvocation,
+        journal_retention_policy: JournalRetentionPolicy,
+        timestamp: MillisSinceEpoch,
+    ) -> Self {
+        completing
+            .timestamps
+            .record_completed_transition_time(timestamp);
+
+        Self {
+            invocation_target: completing.invocation_target,
+            created_using_restate_version: completing.created_using_restate_version,
+            source: completing.source,
+            execution_time: completing.execution_time,
+            idempotency_key: completing.idempotency_key,
+            timestamps: completing.timestamps,
+            response_result: completing.response_result,
+            completion_retention_duration: completing.completion_retention_duration,
+            journal_retention_duration: completing.journal_retention_duration,
+            journal_metadata: if journal_retention_policy == JournalRetentionPolicy::Retain {
+                completing.journal_metadata
+            } else {
+                JournalMetadata::empty()
+            },
+            pinned_deployment: completing.pinned_deployment,
+            random_seed: completing.random_seed,
+            linked_from_count: completing.linked_from_count,
+            linked_to_count: completing.linked_to_count,
         }
     }
 
@@ -981,6 +1188,8 @@ mod test_util {
                 idempotency_key: None,
                 hotfix_apply_cancellation_after_deployment_is_pinned: false,
                 random_seed: None,
+                linked_from_count: 0,
+                linked_to_count: 0,
             }
         }
     }
@@ -1012,6 +1221,8 @@ mod test_util {
                 journal_metadata: JournalMetadata::empty(),
                 pinned_deployment: None,
                 random_seed: None,
+                linked_from_count: 0,
+                linked_to_count: 0,
             }
         }
         pub fn mock_neo() -> Self {
@@ -1040,6 +1251,8 @@ mod test_util {
                 journal_metadata: JournalMetadata::empty(),
                 pinned_deployment: None,
                 random_seed: None,
+                linked_from_count: 0,
+                linked_to_count: 0,
             }
         }
     }

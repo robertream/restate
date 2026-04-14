@@ -27,7 +27,7 @@ pub(crate) fn append_virtual_object_status_row(
 
     // Invocation id
     if row.is_invocation_id_defined()
-        && let VirtualObjectStatus::Locked(invocation_id) = status
+        && let VirtualObjectStatus::Locked { invocation_id, .. } = status
     {
         row.fmt_invocation_id(invocation_id);
     }

@@ -19,6 +19,9 @@ use restate_storage_api::journal_table;
 use restate_storage_api::journal_table_v2::WriteJournalTable;
 use restate_storage_api::lock_table::WriteLockTable;
 use restate_storage_api::promise_table::WritePromiseTable;
+use restate_storage_api::service_status_table::{
+    ReadVirtualObjectStatusTable, WriteVirtualObjectStatusTable,
+};
 use restate_storage_api::state_table::WriteStateTable;
 use restate_storage_api::vqueue_table::{
     EntryStatusHeader, ReadVQueueTable, Stage, WriteVQueueTable,
@@ -50,6 +53,9 @@ where
         + WriteInvocationStatusTable
         + WriteStateTable
         + journal_table::WriteJournalTable
+        + IdempotencyTable
+        + ReadVirtualObjectStatusTable
+        + WriteVirtualObjectStatusTable
         + WritePromiseTable
         + WriteJournalEventsTable,
 {

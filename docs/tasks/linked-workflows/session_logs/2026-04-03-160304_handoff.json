@@ -1,0 +1,82 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-03-160304",
+  "branch_name": "linked-workflows",
+  "task_name": "linked-workflows",
+  "session_number": 6,
+  "continuity": {
+    "started": "2026-04-02",
+    "sessions_reviewed": 5,
+    "arc_goal": "Implement linked workflows MVP and post-MVP link lifecycle management: parent-to-child workflow links with completion blocking, cross-partition cancellation, observable state graphs, bidirectional link records, purge guard for linked children, and link garbage collection on purge/clear state."
+  },
+  "progress_update": {
+    "summary": "We designed bidirectional link records for link GC. The link table now stores both outgoing (parent→child) and incoming (child→parent) records using a LinkDirection enum. Incoming records are written when the child's partition processes AttachInvocation with a Link sink. Key collision prevents cyclic graphs. Purge guard rejects purge while incoming links exist. RemoveParentLink cross-partition notification removes incoming records when parent purges/unlinks. Wrote a failing TDD test for the full lifecycle. Task breakdown complete, ready for implementation.",
+    "goal": "Implement linked workflows MVP and post-MVP link lifecycle: completion blocking, cross-partition cancellation, cancellation propagation, link removal, and link lifecycle management (bidirectional records, purge guard, GC on purge/clear state).",
+    "accomplished": [
+      "Designed bidirectional link model: Link struct with local_service_id/remote_service_id/direction (LinkDirection::Parent|Child)/state",
+      "Designed RemoveParentLink cross-partition notification for parent purge/unlink/clear state",
+      "Designed purge guard: has_parent_links check rejects purge while child has incoming links",
+      "Wrote failing TDD integration test: linked_child_cannot_be_purged_until_parent_unlinks",
+      "Created task breakdown: 3 phases, 7 parent tasks, 12 sub-tasks (link_gc_tasks.md v3)",
+      "Also this session: added HandlerInvocation sink, implemented CreateLink/RemoveLink codecs (removed unimplemented panics), removed update_link_state, cleaned up proto reserved fields"
+    ],
+    "now": "Failing TDD test written. Task breakdown finalized. Ready to implement bidirectional links + link GC.",
+    "next_steps": [
+      "Phase 1: Refactor Link struct (local/remote/direction), add has_parent_links, delete_all_links_for_service, RemoveParentLink message",
+      "Phase 2: Write incoming link on AttachInvocation with Link sink, cycle prevention in CreateLink, purge guard, RemoveLink sends RemoveParentLink, VO clear state cleanup",
+      "Phase 3: Make failing test pass + additional GC tests"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Single link table (b'lk' prefix) for both directions — direction stored as field, not in key",
+      "Key collision (local, remote) prevents cyclic graphs — both directions can't coexist for same pair",
+      "LinkState only meaningful for LinkDirection::Parent records",
+      "Incoming link written when child's partition processes AttachInvocation with Link sink",
+      "Cross-partition links from day one — all link operations use outbox messages",
+      "Only workflows can enter Completing — VOs complete immediately regardless of links",
+      "Links keyed by (parent_service_id, child_service_id) — no label, no child_invocation_id"
+    ],
+    "decisions": [
+      "LinkDirection::Parent/Child enum instead of bool — clearer semantics",
+      "local_service_id/remote_service_id field names — direction determines which is parent vs child",
+      "has_parent_links instead of has_incoming_links — domain vocabulary over graph theory",
+      "Command::RemoveParentLink — describes the action from receiver's perspective",
+      "No parent_service_ids on CompletedInvocation — incoming link records serve the same purpose",
+      "Removed label field entirely — links identified by child_service_id, not arbitrary label string",
+      "Extracted cancel_linked_children helper used by cancel (Invoked/Suspended/Paused + Completing) and kill (Completing)",
+      "Link barrier check moved outside sinks/retention guard — workflows always enter Completing with running links",
+      "No active_children_count — query link table for Running links instead of maintaining denormalized counter",
+      "Completion delivers Result<T, E> only — no status field, no inline frozen graph",
+      "Completing variant carries InFlightInvocationMetadata + buffered ResponseResult",
+      "RemoveLink included in MVP — graph curation is load-bearing",
+      "End-to-end integration test included in MVP scope",
+      "Cancellation is local per node — each node cancels its own direct children"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Graph traversal API — how does a parent inspect the frozen state graph of completed children? (deferred)",
+      "Orphan GC policy — default timeout for orphaned workflows? (deferred)"
+    ],
+    "risks": []
+  },
+  "working_set": {
+    "key_files": [
+      "docs/tasks/linked-workflows/task_context.md",
+      "docs/tasks/linked-workflows/specs/link_gc_tasks.md",
+      "crates/worker/src/partition/state_machine/tests/linked_workflows.rs",
+      "crates/storage-api/src/link_table/mod.rs",
+      "crates/storage-api/src/outbox_table/mod.rs",
+      "crates/worker/src/partition/state_machine/lifecycle/purge.rs",
+      "crates/worker/src/partition/state_machine/mod.rs"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "cargo check -p restate-worker",
+      "cargo nextest run -p restate-worker linked_child_cannot_be_purged"
+    ]
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "a27724ce5"
+  }
+}

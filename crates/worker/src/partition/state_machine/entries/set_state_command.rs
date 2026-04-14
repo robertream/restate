@@ -8,19 +8,24 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use tracing::warn;
+
+use restate_storage_api::service_status_table::{
+    ReadVirtualObjectStatusTable, VirtualObjectStatus,
+};
+use restate_storage_api::state_table::WriteStateTable;
+use restate_types::journal_v2::{EntryMetadata, SetStateCommand};
+
 use crate::debug_if_leader;
 use crate::partition::state_machine::entries::ApplyJournalCommandEffect;
 use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext};
-use restate_storage_api::state_table::WriteStateTable;
-use restate_types::journal_v2::{EntryMetadata, SetStateCommand};
-use tracing::warn;
 
 pub(super) type ApplySetStateCommand<'e> = ApplyJournalCommandEffect<'e, SetStateCommand>;
 
 impl<'e, 'ctx: 'e, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
     for ApplySetStateCommand<'e>
 where
-    S: WriteStateTable,
+    S: WriteStateTable + ReadVirtualObjectStatusTable,
 {
     async fn apply(self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
         let invocation_metadata = self
@@ -29,6 +34,19 @@ where
             .expect("In-Flight invocation metadata must be present");
 
         if let Some(service_id) = invocation_metadata.invocation_target.as_keyed_service_id() {
+            // Reject state mutations if the object has already completed
+            let status = ctx.storage.get_virtual_object_status(&service_id).await?;
+            if matches!(status, VirtualObjectStatus::Completed { .. }) {
+                warn!(
+                    "Rejecting SetState for completed service object {}",
+                    service_id
+                );
+                // SetState has no completion to deliver — we silently ignore it.
+                // The design says "rejected with SERVICE_COMPLETED error" but SetState
+                // is a no-completion command in journal_v2. We log a warning and skip.
+                return Ok(());
+            }
+
             debug_if_leader!(
                 ctx.is_leader,
                 restate.state.key = ?self.entry.key,

@@ -46,7 +46,7 @@ use restate_types::invocation::{
 };
 use restate_types::journal;
 use restate_types::journal_v2::command::{
-    CallCommand, CallRequest, InputCommand, OneWayCallCommand,
+    CallCommand, CallRequest, InputCommand, OneWayCallCommand, StartLinkedCommand,
 };
 use restate_types::journal_v2::raw::{RawCommand, RawEntry, RawNotification};
 use restate_types::journal_v2::{
@@ -1382,6 +1382,92 @@ where
             Message::Custom(_, _) => {
                 unimplemented!()
             }
+            // Linked services commands — pass through as raw bytes (noparse)
+            Message::LinkServiceCommand(cmd) => {
+                self.handle_new_command(mh, RawCommand::new(CommandType::LinkService, cmd));
+                TerminalLoopState::Continue(())
+            }
+            Message::CompleteServiceCommand(cmd) => {
+                self.handle_new_command(mh, RawCommand::new(CommandType::CompleteService, cmd));
+                TerminalLoopState::Continue(())
+            }
+            Message::UnlinkServiceCommand(cmd) => {
+                self.handle_new_command(mh, RawCommand::new(CommandType::UnlinkService, cmd));
+                TerminalLoopState::Continue(())
+            }
+            Message::StartLinkedCommand(cmd) => {
+                let entry: Entry = StartLinkedCommand {
+                    request: crate::shortcircuit!(
+                        resolve_call_request(
+                            self.invocation_task.schemas.live_load(),
+                            InvokeRequest {
+                                service_name: cmd.service_name.into(),
+                                handler_name: cmd.handler_name.into(),
+                                parameter: cmd.parameter,
+                                headers: cmd.headers.into_iter().map(Into::into).collect(),
+                                key: cmd.key.into(),
+                                idempotency_key: cmd.idempotency_key.map(|s: String| s.into()),
+                                span_relation: parent_span_context.as_linked()
+                            }
+                        )
+                        .map_err(|e| InvokerError::CommandPrecondition(
+                            self.command_index,
+                            EntryType::Command(CommandType::StartLinked),
+                            e
+                        ))
+                    ),
+                    result_completion_handler: cmd
+                        .completion_handler_name
+                        .map(|s: String| s.into()),
+                    link_completion_id: cmd.result_completion_id,
+                    name: cmd.name.into(),
+                }
+                .into();
+                self.handle_new_command(
+                    mh,
+                    entry
+                        .encode::<ServiceProtocolV4Codec>()
+                        .try_into()
+                        .expect("a raw command"),
+                );
+                TerminalLoopState::Continue(())
+            }
+            // Linked services completion notifications — unexpected (server → SDK direction only)
+            Message::LinkServiceCompletionNotification(_) => TerminalLoopState::Failed(
+                InvokerError::UnexpectedMessageV4(MessageType::LinkServiceCompletionNotification),
+            ),
+            Message::CompleteServiceCompletionNotification(_) => {
+                TerminalLoopState::Failed(InvokerError::UnexpectedMessageV4(
+                    MessageType::CompleteServiceCompletionNotification,
+                ))
+            }
+            Message::StartLinkedCompletionNotification(_) => TerminalLoopState::Failed(
+                InvokerError::UnexpectedMessageV4(MessageType::StartLinkedCompletionNotification),
+            ),
+            // UnlinkInvocation command — pass raw bytes through (noparse)
+            Message::UnlinkInvocationCommand(cmd) => {
+                self.handle_new_command(mh, RawCommand::new(CommandType::UnlinkInvocation, cmd));
+                TerminalLoopState::Continue(())
+            }
+            // UnlinkService completion notification — unexpected (server → SDK direction only)
+            Message::UnlinkServiceCompletionNotification(_) => TerminalLoopState::Failed(
+                InvokerError::UnexpectedMessageV4(MessageType::UnlinkServiceCompletionNotification),
+            ),
+            // UnlinkInvocation completion notification — unexpected (server → SDK direction only)
+            Message::UnlinkInvocationCompletionNotification(_) => {
+                TerminalLoopState::Failed(InvokerError::UnexpectedMessageV4(
+                    MessageType::UnlinkInvocationCompletionNotification,
+                ))
+            }
+            // AttachService command — pass raw bytes through (noparse)
+            Message::AttachServiceCommand(cmd) => {
+                self.handle_new_command(mh, RawCommand::new(CommandType::AttachService, cmd));
+                TerminalLoopState::Continue(())
+            }
+            // AttachService completion notification — unexpected (server → SDK direction only)
+            Message::AttachServiceCompletionNotification(_) => TerminalLoopState::Failed(
+                InvokerError::UnexpectedMessageV4(MessageType::AttachServiceCompletionNotification),
+            ),
         }
     }
 

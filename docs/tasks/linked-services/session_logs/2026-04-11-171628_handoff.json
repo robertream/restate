@@ -1,0 +1,108 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-11-171628",
+  "branch_name": "linked-services",
+  "task_name": "linked-services",
+  "session_number": 7,
+  "continuity": {
+    "started": "2026-04-08",
+    "sessions_reviewed": 3,
+    "arc_goal": "Implement complete linked services system across three phases: Phase A (object-to-object linking with completion, onCompleted handlers, GC cascade), Phase A.2 (refactor completion model from LinkedFrom-as-sink to unified response_sinks on both VO and WI; eliminate LinkCompletionSink type), Phase B (workflow invocation linking with InvocationEdges, StartLinkedCommand, coupled link+invocation semantics, InvocationStatus::Completing, and full link matrix: VO↔VO, VO↔WI, WI↔VO, WI↔WI)"
+  },
+  "progress_update": {
+    "summary": "Phase A.2 + B implementation complete through multiple refactor passes. We landed the Unified Response Sinks refactor (commit 4c1ac82c8) which eliminated LinkCompletionSink and unified completion dispatch across VO and WI via response_sinks on both entity types. Two code review rounds caught critical bugs: a silent cross-partition hang when StartLinkedCommand targets an idempotent deduped child, and an unsafe JSON encoding in fire_service_completion that would break on error messages containing quotes. Both fixed in commit b14948f22. Branch has 22 integration tests passing, 174/174 full worker suite passing.",
+    "goal": "Complete linked services Phase A.2 + Phase B: unified completion dispatch model, full link matrix (VO↔VO, VO↔WI, WI↔VO, WI↔WI), InvocationStatus::Completing lifecycle, AttachServiceCommand for WI→VO awaiting, Option A command/handle split, clean and reviewable code that preserves Phase A behaviors.",
+    "accomplished": [
+      "Implemented Phase A (Session 5): ServiceEdges table, ServiceNodeId, VirtualObjectStatus::Completed, LinkServiceCommand, CompleteServiceCommand, UnlinkServiceCommand with journal types, proto, codec, outbox, WAL dispatch, state machine handlers; fixed 3 code review findings (cycle detection, external state mutation, failure encoding); 9 commits, 6/6 tests",
+      "Designed Phase A.2 + B (Session 6): produced plan_phase_a2.md, plan_phase_b.md, combined 25-subtask breakdown with dependency analysis and parallel execution waves; key innovations: LinkedFrom-as-completion-sink model, LinkCompletionSink enum, LinkCompletionNotification unified message, InvocationEdges table, StartLinkedCommand with link response sink, coupled link+invocation semantics",
+      "Implemented Phase A.2 refactor (Session 7 final): eliminated LinkCompletionSink type entirely; replaced with ServiceInvocationResponseSink::ServiceCompletion(ServiceCompletionTarget); refactored VirtualObjectStatus to struct variants (Locked { invocation_id, response_sinks } / Unlocked { response_sinks }) with Completed staying as tuple variant (type-enforced terminal); EdgeState::LinkedFrom simplified to presence-only; unified response_sinks on both VO and WI entity types instead of maintaining two dispatch pipes",
+      "Fixed two critical code review findings in b14948f22: (C1) silent hang when StartLinkedCommand targets idempotent deduped child — added on_link_from_deduplicated_invocation helper, capture link_from metadata before handle_duplicated_requests; (C2) unsafe JSON encoding in fire_service_completion — replaced format-string with serde_json::to_vec on typed FailurePayload struct",
+      "Completed Option A split for Unlink commands: UnlinkServiceCommand/UnlinkInvocationCommand split by target type, added completion flow (previously @no_completion), polymorphic UnlinkRequest/UnlinkResponse for cross-partition",
+      "Deleted AttachLinkCommand entirely — Phase A's AttachInvocationCommand handles linked WI children unchanged via response_sinks path; AttachServiceCommand handles linked VO children via new mechanism",
+      "Test coverage at 22 linked_services tests: full matrix (VO↔VO, VO↔WI, WI↔VO, WI↔WI), Completing lifecycle, short-circuit path for already-completed targets, VO unlink sink cleanup, WI unlink preservation of PartitionProcessor sinks (critical 'WI blocks forever' regression guard), idempotent dedup + link establishment, special-character failure JSON encoding"
+    ],
+    "now": "All planned work for Phase A.2 + B is complete. 22/22 linked_services tests pass, 174/174 worker suite passes. Clean cargo check/fmt/clippy. Branch at commit b14948f22. One known follow-up: retention inheritance for fire_service_completion (IMPORTANT-1 from review was partially addressed — unused param removed, but threading completion_retention_duration through send_response_to_sinks was deferred as it touches 13 call sites).",
+    "next_steps": [
+      "Consider squashing the 25 commits on the branch before PR/review — current history has useful granularity for narrative but might be too detailed for final merge",
+      "Follow-up commit: thread retention inheritance through send_response_to_sinks for spawned ServiceCompletion handler invocations (IMPORTANT-1 from unified_response_sinks_review.md)",
+      "Full workspace validation: cargo nextest run --all-features to catch any cross-crate regressions from the cumulative refactors",
+      "SDK work: Phase A.2 + B requires SDK-side implementation (sdk-shared-core + Rust SDK) for StartLinkedCommand, AttachServiceCommand, UnlinkServiceCommand, UnlinkInvocationCommand, and the new LinkServiceCommand shape"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Phase A behaviors preserved: cycle detection, GC cascade, external state mutation guard, stale edge cleanup, JSON failure encoding in onCompleted handler",
+      "VirtualObjectStatus now has struct variants (Locked { invocation_id, response_sinks } / Unlocked { response_sinks }); Completed stays as tuple variant with no sinks (terminal, type-enforced)",
+      "LinkCompletionSink type fully deleted — ServiceInvocationResponseSink::ServiceCompletion(ServiceCompletionTarget) is the replacement",
+      "EdgeState::LinkedFrom is presence-only — all callback data lives in target entity's response_sinks",
+      "WI unlinker MUST NOT filter response_sinks (would break WI blocking on attach sink)",
+      "has_links flag on InFlightInvocationMetadata still gates RocksDB scans in end_invocation for performance",
+      "AttachInvocationCommand handles linked WI child awaiting unchanged — Phase A mechanism; AttachServiceCommand handles VO child awaiting via new path",
+      "ServiceNodeId → EntityId rename throughout (not retroactive); LinkServiceResponse → LinkResponse unified; ServiceCompletionNotification → LinkCompletionNotification",
+      "Unlink (not RemoveLink) as verb — UnlinkServiceCommand/UnlinkInvocationCommand, UnlinkServiceRequest/UnlinkInvocationRequest, ctx.unlink()",
+      "All tables logical within one RocksDB CF per partition — 2-byte KeyKind prefix",
+      "WAL serialization must remain backward compatible (Option<T> defaults to None)",
+      "Proto type IDs: LinkService=0x0415/0x8015, CompleteService=0x0416/0x8016, UnlinkService=0x0417/0x8017"
+    ],
+    "decisions": [
+      "Unified response sinks on both VO and WI entity types rather than maintaining two dispatch pipes (LinkedFrom-based for VO completion, response_sinks for WI)",
+      "VirtualObjectStatus::Locked/Unlocked gain inline response_sinks as struct variants; Completed has no sinks field (type-enforced terminal state) — matches Phase A's InvocationStatus pattern",
+      "Two link establishment paths: Path A (LinkServiceCommand → LinkRequest round-trip) for existing children; Path B (StartLinkedCommand → ServiceInvocation.link_from piggyback) for new WI children",
+      "Already-completed target short-circuits: on_link_request fires handler immediately with stored result, emits LinkCompletionNotification for edge transition, sends LinkResponse(Ok) — mirrors AttachInvocationCommand semantics",
+      "Option A split for unlink commands: UnlinkServiceCommand (VO target) / UnlinkInvocationCommand (WI target) — type-level split at command layer only",
+      "AttachLinkCommand deleted entirely — Phase A's AttachInvocationCommand handles the WI child await case natively via response_sinks path",
+      "Coupled link+invocation semantics: StartLinkedCommand link failure rejects the invocation entirely",
+      "Two edge tables: ServiceEdges (VO parents, service-level) + InvocationEdges (WI parents, invocation-scoped)",
+      "ServiceEdgeState uses proto oneof to unify edge label + state — no separate edge_label param on put_service_edge",
+      "LinkedFrom edges store a minimal ServiceEdgeState::LinkedFrom proto value (not empty bytes) to prevent deserialization errors",
+      "onCompleted handler encodes failure details as JSON in typed FailurePayload (not format-string) — safe for special characters",
+      "LinkServiceResponse carries remote_node_id for stale edge cleanup on error",
+      "Vertical command slices: each command task covers full stack (journal + proto + codec + outbox + WAL)",
+      "GC cascade: no parents + Completed → delete state/promises/status/edges + propagate UnlinkServiceRequest to children",
+      "Phase A ships independently from Phase B — Phase A anchors only objects, Phase B adds WorkflowInvocation nodes"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Should retention for spawned handler invocations inherit from the parent's retention duration, fall back to a configured default, or stay at Duration::ZERO? (IMPORTANT-1 from review is partial — decision pending)",
+      "Should the 25 commits on this branch be squashed before PR, or kept as a detailed history for reviewers?",
+      "SDK implementation scope — how many commands does the Rust SDK need to expose (Link, StartLinked, AttachService, AttachInvocation, UnlinkService, UnlinkInvocation)?",
+      "Is there interest in storage redundancy optimization now that LinkedFrom is presence-only? The value optimization was the original motivation for this refactor path but may not be worth pursuing separately.",
+      "Whether append_invocation Appended→Submitted response type change is a breaking API change",
+      "Whether WAL format version bump needed for adding Option fields to command payloads"
+    ],
+    "risks": [
+      "Retention inheritance follow-up could surface more call-site complexity than anticipated — send_response_to_sinks has 13 call sites, most without parent context readily available",
+      "Full workspace test run not yet executed — potential cross-crate regressions from the cumulative refactors unlikely but not verified",
+      "VirtualObjectStatus struct variant change touches pattern matches across the entire codebase — compile check passes but runtime behavior in non-linked-services paths is only validated by the 174-test worker suite"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/tasks/linked-services/specs/plan_unified_response_sinks.md",
+      "docs/tasks/linked-services/reviews/unified_response_sinks_review.md",
+      "docs/tasks/linked-services/reviews/phase_a2_b_comprehensive_review.md",
+      "crates/types/src/invocation/mod.rs",
+      "crates/storage-api/src/service_status_table/mod.rs",
+      "crates/worker/src/partition/state_machine/mod.rs",
+      "crates/worker/src/partition/state_machine/entries/link_service_command.rs",
+      "crates/worker/src/partition/state_machine/entries/start_linked_command.rs",
+      "crates/worker/src/partition/state_machine/entries/complete_service_command.rs",
+      "crates/worker/src/partition/state_machine/entries/unlink_service_command.rs",
+      "crates/worker/src/partition/state_machine/tests/linked_services.rs",
+      "crates/storage-api/proto/dev/restate/storage/v1/domain.proto",
+      "crates/storage-api/src/protobuf_types.rs",
+      "crates/worker/Cargo.toml"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "cargo check --all-targets",
+      "cargo nextest run -p restate-worker linked_services --all-features",
+      "cargo nextest run -p restate-worker --all-features",
+      "cargo fmt --all -- --check",
+      "cargo clippy --all-targets --workspace -- -D warnings"
+    ]
+  },
+  "context": {
+    "wip_state": "clean",
+    "last_commit": "b14948f22"
+  }
+}

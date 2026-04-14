@@ -143,7 +143,7 @@ where
             Ok(InvocationStatus::Scheduled(_)) | Ok(InvocationStatus::Inboxed(_)) => {
                 replier.send(ResumeInvocationRpcResponse::NotStarted);
             }
-            Ok(InvocationStatus::Completed(_)) => {
+            Ok(InvocationStatus::Completing(_)) | Ok(InvocationStatus::Completed(_)) => {
                 replier.send(ResumeInvocationRpcResponse::Completed);
             }
             Ok(InvocationStatus::Free) => {

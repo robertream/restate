@@ -295,6 +295,9 @@ pub const WORKFLOW_ALREADY_INVOKED_INVOCATION_ERROR: InvocationError =
 pub const NOT_READY_INVOCATION_ERROR: InvocationError =
     InvocationError::new_static(codes::NOT_READY, "the response is not ready yet");
 
+pub const SERVICE_COMPLETED_INVOCATION_ERROR: InvocationError =
+    InvocationError::new_static(codes::CONFLICT, "the service object has already completed");
+
 /// Error parsing/decoding a resource ID.
 #[derive(Debug, thiserror::Error, Clone, Eq, PartialEq)]
 pub enum IdDecodeError {

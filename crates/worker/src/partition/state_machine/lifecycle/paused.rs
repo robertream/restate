@@ -54,6 +54,7 @@ where
             | InvocationStatus::Paused(_)
             | InvocationStatus::Scheduled(_)
             | InvocationStatus::Inboxed(_)
+            | InvocationStatus::Completing(_)
             | InvocationStatus::Completed(_)
             | InvocationStatus::Free => {
                 // Nothing to do in these cases, pause gets processed only if the invocation was Invoked.

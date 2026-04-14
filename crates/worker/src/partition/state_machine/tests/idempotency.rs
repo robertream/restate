@@ -129,6 +129,8 @@ async fn complete_already_completed_invocation() {
             journal_metadata: JournalMetadata::empty(),
             pinned_deployment: None,
             random_seed: None,
+            linked_from_count: 0,
+            linked_to_count: 0,
         }),
     )
     .unwrap();
@@ -386,7 +388,7 @@ async fn attach_inboxed_with_send_service_invocation() {
         let mut tx = test_env.storage.transaction();
         tx.put_virtual_object_status(
             &invocation_target.as_keyed_service_id().unwrap(),
-            &VirtualObjectStatus::Locked(InvocationId::mock_generate(&invocation_target)),
+            &VirtualObjectStatus::locked(InvocationId::mock_generate(&invocation_target)),
         )
         .unwrap();
         tx.commit().await.unwrap();

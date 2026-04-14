@@ -553,6 +553,20 @@ pub struct ServiceInvocation {
     /// or when this request started a fresh invocation.
     pub submit_notification_sink: Option<SubmitNotificationSink>,
 
+    /// Parent entity for link establishment via `StartLinkedCommand` piggyback path.
+    ///
+    /// If `Some`, the child-side `on_service_invocation` handler increments the child's
+    /// `linked_from_count` and inserts a link notification sink into its `response_sinks`.
+    /// This field is independent of `response_sink`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_from: Option<EntityId>,
+
+    /// Completion id for routing `LinkResponse` back to the parent's journal entry.
+    /// Set by `StartLinkedCommand` only when `link_from` is `Some`.
+    /// Enables the child side to send `LinkResponse` with the correct completion id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_caller_completion_id: Option<CompletionId>,
+
     /// Restate version at the moment of the invocation creation.
     pub restate_version: RestateVersion,
 }
@@ -587,6 +601,8 @@ impl ServiceInvocation {
             limit_key: request.header.limit_key,
             response_sink: None,
             submit_notification_sink: None,
+            link_from: None,
+            link_caller_completion_id: None,
             restate_version: RestateVersion::current(),
         }
     }
@@ -610,6 +626,8 @@ impl ServiceInvocation {
             idempotency_key: None,
             limit_key: LimitKey::None,
             submit_notification_sink: None,
+            link_from: None,
+            link_caller_completion_id: None,
             restate_version: RestateVersion::current(),
         }
     }
@@ -745,6 +763,228 @@ impl From<&InvocationError> for ResponseResult {
     }
 }
 
+/// Identifies a node in the linked-services graph.
+///
+/// `WorkflowInvocation` is defined here for Phase B use; Phase A only writes `Object`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum EntityId {
+    Object(ServiceId),
+    WorkflowInvocation(InvocationId),
+}
+
+impl EntityId {
+    pub fn partition_key(&self) -> PartitionKey {
+        match self {
+            EntityId::Object(sid) => sid.partition_key(),
+            EntityId::WorkflowInvocation(iid) => iid.partition_key(),
+        }
+    }
+}
+
+impl WithPartitionKey for EntityId {
+    fn partition_key(&self) -> PartitionKey {
+        EntityId::partition_key(self)
+    }
+}
+
+/// Target of a service-completion handler invocation — identifies the VO and handler
+/// that should be invoked when a linked child completes.
+///
+/// Retention fields are inherited from the linking parent at the moment `LinkServiceCommand`
+/// or `StartLinkedCommand` is issued, and are persisted alongside the sink so the spawned
+/// handler invocation is retained per the parent's policy regardless of when and where the
+/// sink fires (short-circuit, `end_invocation`, `CompleteServiceCommand`, inbox drain, etc.).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ServiceCompletionTarget {
+    /// The VO service instance that owns the completion handler.
+    pub service_id: ServiceId,
+    /// The handler name to invoke (e.g., "onCompleted").
+    pub handler_name: ByteString,
+    /// Retention for the spawned handler invocation — inherited from the linker parent.
+    pub completion_retention_duration: Duration,
+    /// Journal retention for the spawned handler invocation — inherited from the linker parent.
+    pub journal_retention_duration: Duration,
+}
+
+/// Unified edge state for both `ServiceEdges` and `InvocationEdges` tables.
+///
+/// Only `LinkedTo` edges are stored — parent tracking is handled by `linked_from_count`
+/// on status types, and completion notifications are dispatched via link notification
+/// sinks in the child's `response_sinks`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EdgeState {
+    LinkedTo(LinkStatus),
+}
+
+impl EdgeState {
+    /// Returns the edge label for key encoding.
+    pub fn edge_label(&self) -> EdgeLabel {
+        match self {
+            EdgeState::LinkedTo(_) => EdgeLabel::LinkedTo,
+        }
+    }
+}
+
+/// Discriminant byte used in RocksDB edge-table keys.
+///
+/// Shared by `ServiceEdges` and `InvocationEdges` tables — both use the same label encoding.
+/// Use [`EdgeLabel::number`] to get the raw byte for key construction.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EdgeLabel {
+    LinkedTo = 0x00,
+    // LinkedFrom = 0x01 was removed — parent tracking now uses linked_from_count + link notification sinks.
+}
+
+impl EdgeLabel {
+    pub const fn number(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_number(n: u8) -> Option<Self> {
+        match n {
+            0x00 => Some(Self::LinkedTo),
+            // 0x01 was LinkedFrom — old data may still reference it; return None.
+            _ => None,
+        }
+    }
+}
+
+/// Status of an outgoing (LinkedTo) edge.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LinkStatus {
+    Active,
+    Completed,
+}
+
+/// Graph-only notification sent from child partition to parent partition when a child completes.
+///
+/// Triggers edge transition (`LinkedTo(Active) → Completed`) and `Completing` resume check
+/// on the parent side. No result payload — callbacks are dispatched via the child's
+/// `response_sinks` collection independently.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LinkCompletionNotification {
+    /// The link initiator (routes to its partition).
+    pub linked_from: EntityId,
+    /// The linked-to entity that completed.
+    pub linked_to: EntityId,
+}
+
+impl WithPartitionKey for LinkCompletionNotification {
+    fn partition_key(&self) -> PartitionKey {
+        self.linked_from.partition_key()
+    }
+}
+
+/// Sent from parent partition to child partition: decrement the child's `linked_from_count`
+/// and remove the parent's notification sink from the child's `response_sinks`.
+/// If `caller_completion_id` is `Some`, the child partition sends an `UnlinkResponse` back.
+/// GC cascade uses `None` (no response expected).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnlinkRequest {
+    /// The linked-to entity (routes to its partition).
+    pub linked_to: EntityId,
+    /// The entity that established the link — used to remove its notification sink.
+    pub linked_from: EntityId,
+    /// The invocation that issued the Unlink command.
+    pub caller_invocation_id: InvocationId,
+    /// `Some(id)` for SDK-initiated unlinks (expects response); `None` for GC cascade.
+    pub caller_completion_id: Option<CompletionId>,
+}
+
+impl WithPartitionKey for UnlinkRequest {
+    fn partition_key(&self) -> PartitionKey {
+        self.linked_to.partition_key()
+    }
+}
+
+/// Sent from child partition back to parent partition: unlink acknowledged.
+/// Only sent when `UnlinkRequest.caller_completion_id` is `Some`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnlinkResponse {
+    /// The entity that established the link (routes to its partition).
+    pub linked_from: EntityId,
+    /// The invocation that issued the Unlink command.
+    pub caller_invocation_id: InvocationId,
+    /// The completion id to unblock.
+    pub completion_id: CompletionId,
+    /// `Ok(())` on success, `Err(InvocationError)` on rejection.
+    pub result: Result<(), InvocationError>,
+}
+
+impl WithPartitionKey for UnlinkResponse {
+    fn partition_key(&self) -> PartitionKey {
+        self.linked_from.partition_key()
+    }
+}
+
+/// Sent from parent partition to child VO partition: increment the child's `linked_from_count`,
+/// insert notification sinks into the child's `response_sinks`, and optionally register a
+/// `ServiceCompletion` sink. Used by `LinkServiceCommand` only.
+/// For `StartLinkedCommand` (new child), the link is piggybacked on `ServiceInvocation.link_from`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LinkRequest {
+    /// The entity being linked to (routes to its partition). Always a VO (`EntityId::Object`).
+    pub link_to: EntityId,
+    /// The entity establishing the link.
+    pub link_from: EntityId,
+    /// The invocation that issued the `LinkServiceCommand`.
+    pub caller_invocation_id: InvocationId,
+    /// The completion id to unblock when the response arrives.
+    pub caller_completion_id: CompletionId,
+    /// Optional onCompleted handler target. `Some` only for VO parents with a handler registered.
+    /// Retention for the spawned handler is carried on the target itself (see [`ServiceCompletionTarget`]).
+    pub handler_sink: Option<ServiceCompletionTarget>,
+}
+
+impl WithPartitionKey for LinkRequest {
+    fn partition_key(&self) -> PartitionKey {
+        self.link_to.partition_key()
+    }
+}
+
+/// Sent from child partition back to parent partition: link confirmed or rejected.
+///
+/// Replaces `LinkServiceResponse`. On success, the handle is the `remote` field.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LinkResponse {
+    /// The entity that established the link (routes to its partition).
+    pub linked_from: EntityId,
+    /// The linked-to entity — IS the handle on success.
+    pub linked_to: EntityId,
+    /// The invocation that issued the `LinkServiceCommand` — used to route the response.
+    pub caller_invocation_id: InvocationId,
+    /// The completion id to unblock.
+    pub completion_id: CompletionId,
+    /// `Ok(())` on success, `Err(InvocationError)` on rejection.
+    pub result: Result<(), InvocationError>,
+}
+
+impl WithPartitionKey for LinkResponse {
+    fn partition_key(&self) -> PartitionKey {
+        self.linked_from.partition_key()
+    }
+}
+
+/// Sent from a parent partition to a child VO partition to attach a completion sink.
+/// The child VO delivers `LinkCompletionNotification` with `Invocation(caller_id, Some(completion_id))`
+/// when it completes (or immediately if already completed).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AttachServiceRequest {
+    /// The parent invocation that issued `AttachServiceCommand`.
+    pub caller_id: InvocationId,
+    /// The journal completion entry to unblock when the child VO completes.
+    pub completion_id: CompletionId,
+    /// The target VO to attach to (routes to child's partition).
+    pub target: ServiceId,
+}
+
+impl WithPartitionKey for AttachServiceRequest {
+    fn partition_key(&self) -> PartitionKey {
+        self.target.partition_key()
+    }
+}
+
 // Represents a response to get invocation output
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, bilrost::Message)]
 #[serde(
@@ -777,6 +1017,16 @@ pub enum ServiceInvocationResponseSink {
     Ingress {
         request_id: PartitionProcessorRpcRequestId,
     },
+    /// Fire a handler invocation on a target VO with the result bytes as argument.
+    /// Used by `LinkServiceCommand` / `StartLinkedCommand` with `result_completion_handler: Some(name)`.
+    /// Fires via `OutboxMessage::ServiceInvocation` targeting the named handler.
+    ServiceCompletion(ServiceCompletionTarget),
+    /// Emit a `LinkCompletionNotification` to a VO that linked to this entity when it completes.
+    /// The linked-to `EntityId` is supplied by the caller at dispatch time.
+    ServiceLinkNotification { linked_from: ServiceId },
+    /// Emit a `LinkCompletionNotification` to a WI that linked to this entity when it completes.
+    /// The linked-to `EntityId` is supplied by the caller at dispatch time.
+    InvocationLinkNotification { linked_from: InvocationId },
 }
 
 impl ServiceInvocationResponseSink {
@@ -1513,6 +1763,12 @@ mod serde_hacks {
         pub response_sink: Option<ServiceInvocationResponseSink>,
         pub submit_notification_sink: Option<SubmitNotificationSink>,
 
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub link_from: Option<super::EntityId>,
+
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub link_caller_completion_id: Option<CompletionId>,
+
         #[serde(default = "RestateVersion::unknown")]
         pub restate_version: RestateVersion,
 
@@ -1546,6 +1802,8 @@ mod serde_hacks {
                 limit_key,
                 response_sink,
                 submit_notification_sink,
+                link_from,
+                link_caller_completion_id,
                 restate_version,
                 source_ingress_rpc_id,
             }: ServiceInvocation,
@@ -1563,6 +1821,8 @@ mod serde_hacks {
                 limit_key,
                 response_sink: response_sink.map(Into::into),
                 submit_notification_sink: submit_notification_sink.map(Into::into),
+                link_from,
+                link_caller_completion_id,
                 source: match source {
                     Source::Ingress => {
                         super::Source::Ingress(source_ingress_rpc_id.unwrap_or_default())
@@ -1593,6 +1853,8 @@ mod serde_hacks {
                 limit_key,
                 response_sink,
                 submit_notification_sink,
+                link_from,
+                link_caller_completion_id,
                 restate_version,
             }: super::ServiceInvocation,
         ) -> Self {
@@ -1615,6 +1877,8 @@ mod serde_hacks {
                 limit_key,
                 response_sink: response_sink.map(Into::into),
                 submit_notification_sink: submit_notification_sink.map(Into::into),
+                link_from,
+                link_caller_completion_id,
                 restate_version,
                 source_ingress_rpc_id,
                 source: match source {
@@ -1739,6 +2003,12 @@ mod serde_hacks {
             node_id: Option<GenerationalNodeId>,
             request_id: PartitionProcessorRpcRequestId,
         },
+        /// Fire a handler invocation on a target VO with the result bytes as argument.
+        ServiceCompletion(super::ServiceCompletionTarget),
+        /// Emit LinkCompletionNotification to a VO that linked to this entity.
+        ServiceLinkNotification { linked_from: ServiceId },
+        /// Emit LinkCompletionNotification to a WI that linked to this entity.
+        InvocationLinkNotification { linked_from: InvocationId },
     }
 
     impl From<ServiceInvocationResponseSink> for super::ServiceInvocationResponseSink {
@@ -1754,6 +2024,15 @@ mod serde_hacks {
                     caller_id: caller,
                     caller_completion_id: entry_index,
                 }),
+                ServiceInvocationResponseSink::ServiceCompletion(target) => {
+                    Self::ServiceCompletion(target)
+                }
+                ServiceInvocationResponseSink::ServiceLinkNotification { linked_from } => {
+                    Self::ServiceLinkNotification { linked_from }
+                }
+                ServiceInvocationResponseSink::InvocationLinkNotification { linked_from } => {
+                    Self::InvocationLinkNotification { linked_from }
+                }
             }
         }
     }
@@ -1775,6 +2054,15 @@ mod serde_hacks {
                     caller: caller_id,
                     entry_index: caller_completion_id,
                 },
+                super::ServiceInvocationResponseSink::ServiceCompletion(target) => {
+                    Self::ServiceCompletion(target)
+                }
+                super::ServiceInvocationResponseSink::ServiceLinkNotification { linked_from } => {
+                    Self::ServiceLinkNotification { linked_from }
+                }
+                super::ServiceInvocationResponseSink::InvocationLinkNotification {
+                    linked_from,
+                } => Self::InvocationLinkNotification { linked_from },
             }
         }
     }
@@ -1842,6 +2130,8 @@ mod mocks {
                 idempotency_key: None,
                 limit_key: LimitKey::None,
                 submit_notification_sink: None,
+                link_from: None,
+                link_caller_completion_id: None,
                 restate_version: RestateVersion::current(),
             }
         }

@@ -125,19 +125,25 @@ pub mod v1 {
         use super::outbox_message::{
             OutboxCancel, OutboxKill, OutboxServiceInvocation, OutboxServiceInvocationResponse,
         };
-        use super::service_invocation_response_sink::{Ingress, PartitionProcessor, ResponseSink};
+        use super::service_invocation_response_sink::{
+            Ingress, InvocationLinkNotification, PartitionProcessor, ResponseSink,
+            ServiceLinkNotification,
+        };
         use super::{
             BackgroundCallResolutionResult, DedupSequenceNumber, Duration, EnrichedEntryHeader,
-            Entry, EntryResult, EpochSequenceNumber, FailureMetadata, Header, IdempotencyId,
-            InboxEntry, InvocationId, InvocationResolutionResult, InvocationStatusV2,
-            InvocationTarget, InvocationV2Lite, JournalCompletionTarget, JournalEntry,
-            JournalEntryIndex, JournalMeta, KvPair, OutboxMessage, PartitionDurability, Promise,
-            ResponseResult, RestateVersion, SequenceNumber, ServiceId, ServiceInvocation,
+            EntityId, Entry, EntryResult, EpochSequenceNumber, FailureMetadata, Header,
+            IdempotencyId, IdempotencyMetadata, InboxEntry, InvocationId,
+            InvocationResolutionResult, InvocationStatusV2, InvocationTarget, InvocationV2Lite,
+            JournalCompletionTarget, JournalEntry, JournalEntryIndex, JournalMeta, KvPair,
+            LinkCompletionNotification, OutboxMessage, PartitionDurability, Promise,
+            ResponseResult, RestateVersion, SequenceNumber,
+            ServiceEdgeState as ProtoServiceEdgeState, ServiceId, ServiceInvocation,
             ServiceInvocationResponseSink, Source, SpanContext, SpanRelation, StateMutation,
-            SubmitNotificationSink, Timer, VirtualObjectStatus, enriched_entry_header, entry,
-            entry_result, inbox_entry, invocation_resolution_result, invocation_status_v2,
-            invocation_target, journal_entry, outbox_message, promise, response_result, source,
-            span_relation, submit_notification_sink, timer, virtual_object_status,
+            SubmitNotificationSink, Timer, VirtualObjectStatus, enriched_entry_header, entity_id,
+            entry, entry_result, inbox_entry, invocation_resolution_result, invocation_status_v2,
+            invocation_target, journal_entry, outbox_message, promise, response_result,
+            service_edge_state, source, span_relation, submit_notification_sink, timer,
+            virtual_object_status,
         };
         use crate::invocation_status_table::{
             PreFlightInvocationArgument, PreFlightInvocationInput, PreFlightInvocationJournal,
@@ -146,6 +152,7 @@ pub mod v1 {
         use crate::protobuf_types::v1::{
             Future, NotificationEntryIndex, NotificationResultVariant,
         };
+        use restate_types::invocation::{EdgeState, LinkStatus};
 
         impl TryFrom<VirtualObjectStatus> for crate::service_status_table::VirtualObjectStatus {
             type Error = ConversionError;
@@ -157,13 +164,48 @@ pub mod v1 {
                         .ok_or_else(|| ConversionError::missing_field("status"))?
                     {
                         virtual_object_status::Status::Locked(locked) => {
-                            crate::service_status_table::VirtualObjectStatus::Locked(
-                                restate_types::identifiers::InvocationId::try_from(
-                                    locked.invocation_id.ok_or_else(|| {
-                                        ConversionError::missing_field("invocation_id")
-                                    })?,
+                            let invocation_id = restate_types::identifiers::InvocationId::try_from(
+                                locked
+                                    .invocation_id
+                                    .ok_or(ConversionError::missing_field("invocation_id"))?,
+                            )?;
+                            let response_sinks = locked
+                                .response_sinks
+                                .into_iter()
+                                .map(|s| {
+                                    Option::<restate_types::invocation::ServiceInvocationResponseSink>::try_from(s)
+                                        .and_then(|opt| opt.ok_or(ConversionError::missing_field("response_sink")))
+                                })
+                                .collect::<Result<_, _>>()?;
+                            crate::service_status_table::VirtualObjectStatus::Locked {
+                                invocation_id,
+                                response_sinks,
+                                linked_from_count: locked.linked_from_count,
+                            }
+                        }
+                        virtual_object_status::Status::Completed(completed) => {
+                            crate::service_status_table::VirtualObjectStatus::Completed {
+                                result: restate_types::invocation::ResponseResult::try_from(
+                                    completed
+                                        .result
+                                        .ok_or(ConversionError::missing_field("result"))?,
                                 )?,
-                            )
+                                linked_from_count: completed.linked_from_count,
+                            }
+                        }
+                        virtual_object_status::Status::Unlocked(unlocked) => {
+                            let response_sinks = unlocked
+                                .response_sinks
+                                .into_iter()
+                                .map(|s| {
+                                    Option::<restate_types::invocation::ServiceInvocationResponseSink>::try_from(s)
+                                        .and_then(|opt| opt.ok_or(ConversionError::missing_field("response_sink")))
+                                })
+                                .collect::<Result<_, _>>()?;
+                            crate::service_status_table::VirtualObjectStatus::Unlocked {
+                                response_sinks,
+                                linked_from_count: unlocked.linked_from_count,
+                            }
                         }
                     },
                 )
@@ -173,18 +215,118 @@ pub mod v1 {
         impl From<crate::service_status_table::VirtualObjectStatus> for VirtualObjectStatus {
             fn from(value: crate::service_status_table::VirtualObjectStatus) -> Self {
                 match value {
-                    crate::service_status_table::VirtualObjectStatus::Locked(invocation_id) => {
-                        VirtualObjectStatus {
-                            status: Some(virtual_object_status::Status::Locked(
-                                virtual_object_status::Locked {
-                                    invocation_id: Some(invocation_id.into()),
-                                },
-                            )),
-                        }
+                    crate::service_status_table::VirtualObjectStatus::Locked {
+                        invocation_id,
+                        response_sinks,
+                        linked_from_count,
+                    } => VirtualObjectStatus {
+                        status: Some(virtual_object_status::Status::Locked(
+                            virtual_object_status::Locked {
+                                invocation_id: Some(invocation_id.into()),
+                                response_sinks: response_sinks
+                                    .into_iter()
+                                    .map(|s| ServiceInvocationResponseSink::from(Some(s)))
+                                    .collect(),
+                                linked_from_count,
+                            },
+                        )),
+                    },
+                    crate::service_status_table::VirtualObjectStatus::Completed {
+                        result,
+                        linked_from_count,
+                    } => VirtualObjectStatus {
+                        status: Some(virtual_object_status::Status::Completed(
+                            virtual_object_status::Completed {
+                                result: Some(ResponseResult::from(result)),
+                                linked_from_count,
+                            },
+                        )),
+                    },
+                    crate::service_status_table::VirtualObjectStatus::Unlocked {
+                        response_sinks,
+                        linked_from_count,
+                    } => VirtualObjectStatus {
+                        status: Some(virtual_object_status::Status::Unlocked(
+                            virtual_object_status::Unlocked {
+                                response_sinks: response_sinks
+                                    .into_iter()
+                                    .map(|s| ServiceInvocationResponseSink::from(Some(s)))
+                                    .collect(),
+                                linked_from_count,
+                            },
+                        )),
+                    },
+                }
+            }
+        }
+
+        impl TryFrom<EntityId> for restate_types::invocation::EntityId {
+            type Error = ConversionError;
+
+            fn try_from(value: EntityId) -> Result<Self, ConversionError> {
+                match value.node.ok_or(ConversionError::missing_field("node"))? {
+                    entity_id::Node::Object(service_id) => {
+                        Ok(restate_types::invocation::EntityId::Object(
+                            restate_types::identifiers::ServiceId::try_from(service_id)?,
+                        ))
                     }
-                    crate::service_status_table::VirtualObjectStatus::Unlocked => {
-                        unreachable!("Nothing should be stored for unlocked")
+                    entity_id::Node::WorkflowInvocation(iid) => {
+                        Ok(restate_types::invocation::EntityId::WorkflowInvocation(
+                            restate_types::identifiers::InvocationId::try_from(iid)?,
+                        ))
                     }
+                }
+            }
+        }
+
+        impl From<restate_types::invocation::EntityId> for EntityId {
+            fn from(value: restate_types::invocation::EntityId) -> Self {
+                match value {
+                    restate_types::invocation::EntityId::Object(service_id) => EntityId {
+                        node: Some(entity_id::Node::Object(ServiceId::from(service_id))),
+                    },
+                    restate_types::invocation::EntityId::WorkflowInvocation(iid) => EntityId {
+                        node: Some(entity_id::Node::WorkflowInvocation(InvocationId::from(iid))),
+                    },
+                }
+            }
+        }
+
+        impl TryFrom<ProtoServiceEdgeState> for EdgeState {
+            type Error = ConversionError;
+
+            fn try_from(value: ProtoServiceEdgeState) -> Result<Self, ConversionError> {
+                match value.label.ok_or(ConversionError::missing_field("label"))? {
+                    service_edge_state::Label::LinkedToActive(_) => {
+                        Ok(EdgeState::LinkedTo(LinkStatus::Active))
+                    }
+                    service_edge_state::Label::LinkedToCompleted(_) => {
+                        Ok(EdgeState::LinkedTo(LinkStatus::Completed))
+                    }
+                    // LinkedFrom was removed — old data may still have this; treat as an error
+                    // since we should never be reading LinkedFrom edges in new code paths.
+                    service_edge_state::Label::LinkedFrom(_) => {
+                        Err(ConversionError::unexpected_enum_variant(
+                            "label", 3, // LinkedFrom field number
+                        ))
+                    }
+                }
+            }
+        }
+
+        impl From<EdgeState> for ProtoServiceEdgeState {
+            fn from(value: EdgeState) -> Self {
+                match value {
+                    EdgeState::LinkedTo(LinkStatus::Active) => ProtoServiceEdgeState {
+                        label: Some(service_edge_state::Label::LinkedToActive(
+                            service_edge_state::LinkedToActive {},
+                        )),
+                    },
+                    EdgeState::LinkedTo(LinkStatus::Completed) => ProtoServiceEdgeState {
+                        label: Some(service_edge_state::Label::LinkedToCompleted(
+                            service_edge_state::LinkedToCompleted {},
+                        )),
+                    },
                 }
             }
         }
@@ -433,6 +575,8 @@ pub mod v1 {
                     combinator_type,
                     result,
                     hotfix_apply_cancellation_after_deployment_is_pinned,
+                    linked_from_count,
+                    linked_to_count,
                 } = value;
 
                 let invocation_target = expect_or_fail!(invocation_target)?.try_into()?;
@@ -594,6 +738,8 @@ pub mod v1 {
                                 idempotency_key: idempotency_key.map(ByteString::from),
                                 hotfix_apply_cancellation_after_deployment_is_pinned,
                                 random_seed,
+                                linked_from_count,
+                                linked_to_count,
                             },
                         ))
                     }
@@ -639,6 +785,8 @@ pub mod v1 {
                                         idempotency_key: idempotency_key.map(ByteString::from),
                                         hotfix_apply_cancellation_after_deployment_is_pinned,
                                         random_seed,
+                                        linked_from_count,
+                                        linked_to_count,
                                     },
                                 awaiting_on: awaiting_on.try_into()?,
                             },
@@ -673,6 +821,8 @@ pub mod v1 {
                                 idempotency_key: idempotency_key.map(ByteString::from),
                                 hotfix_apply_cancellation_after_deployment_is_pinned,
                                 random_seed,
+                                linked_from_count,
+                                linked_to_count,
                             },
                         ))
                     }
@@ -704,9 +854,43 @@ pub mod v1 {
                                     service_protocol_version,
                                 )?,
                                 random_seed,
+                                linked_from_count,
+                                linked_to_count,
                             },
                         ))
                     }
+                    invocation_status_v2::Status::Completing => Ok(
+                        crate::invocation_status_table::InvocationStatus::Completing(
+                            crate::invocation_status_table::CompletingInvocation {
+                                response_sinks,
+                                timestamps,
+                                invocation_target,
+                                created_using_restate_version,
+                                journal_metadata: crate::invocation_status_table::JournalMetadata {
+                                    length: journal_length,
+                                    commands,
+                                    span_context: expect_or_fail!(span_context)?.try_into()?,
+                                },
+                                pinned_deployment: derive_pinned_deployment(
+                                    deployment_id,
+                                    service_protocol_version,
+                                )?,
+                                source,
+                                execution_time: execution_time.map(MillisSinceEpoch::new),
+                                completion_retention_duration: completion_retention_duration
+                                    .unwrap_or_default()
+                                    .try_into()?,
+                                journal_retention_duration: journal_retention_duration
+                                    .unwrap_or_default()
+                                    .try_into()?,
+                                idempotency_key: idempotency_key.map(ByteString::from),
+                                random_seed,
+                                response_result: expect_or_fail!(result)?.try_into()?,
+                                linked_from_count,
+                                linked_to_count,
+                            },
+                        ),
+                    ),
                     invocation_status_v2::Status::UnknownStatus => Err(
                         ConversionError::unexpected_enum_variant("status", value.status),
                     ),
@@ -786,6 +970,8 @@ pub mod v1 {
                         combinator_type: super::CombinatorType::Unknown.into(),
                         result: None,
                         random_seed,
+                        linked_from_count: 0,
+                        linked_to_count: 0,
                     },
                     crate::invocation_status_table::InvocationStatus::Scheduled(
                         crate::invocation_status_table::ScheduledInvocation {
@@ -870,6 +1056,8 @@ pub mod v1 {
                             combinator_type: super::CombinatorType::Unknown.into(),
                             result: None,
                             random_seed,
+                            linked_from_count: 0,
+                            linked_to_count: 0,
                         }
                     }
                     crate::invocation_status_table::InvocationStatus::Inboxed(
@@ -942,6 +1130,8 @@ pub mod v1 {
                         combinator_type: super::CombinatorType::Unknown.into(),
                         result: None,
                         random_seed,
+                        linked_from_count: 0,
+                        linked_to_count: 0,
                     },
                     crate::invocation_status_table::InvocationStatus::Inboxed(
                         crate::invocation_status_table::InboxedInvocation {
@@ -1026,6 +1216,8 @@ pub mod v1 {
                             combinator_type: super::CombinatorType::Unknown.into(),
                             result: None,
                             random_seed,
+                            linked_from_count: 0,
+                            linked_to_count: 0,
                         }
                     }
                     crate::invocation_status_table::InvocationStatus::Invoked(
@@ -1045,6 +1237,8 @@ pub mod v1 {
                             idempotency_key,
                             hotfix_apply_cancellation_after_deployment_is_pinned,
                             random_seed,
+                            linked_from_count,
+                            linked_to_count,
                         },
                     ) => {
                         let (deployment_id, service_protocol_version) = match pinned_deployment {
@@ -1104,6 +1298,8 @@ pub mod v1 {
                             result: None,
                             hotfix_apply_cancellation_after_deployment_is_pinned,
                             random_seed,
+                            linked_from_count,
+                            linked_to_count,
                         }
                     }
                     crate::invocation_status_table::InvocationStatus::Suspended {
@@ -1124,6 +1320,8 @@ pub mod v1 {
                                 idempotency_key,
                                 hotfix_apply_cancellation_after_deployment_is_pinned,
                                 random_seed,
+                                linked_from_count,
+                                linked_to_count,
                             },
                         awaiting_on,
                     } => {
@@ -1205,6 +1403,8 @@ pub mod v1 {
                             result: None,
                             hotfix_apply_cancellation_after_deployment_is_pinned,
                             random_seed,
+                            linked_from_count,
+                            linked_to_count,
                         }
                     }
                     crate::invocation_status_table::InvocationStatus::Paused(
@@ -1224,6 +1424,8 @@ pub mod v1 {
                             idempotency_key,
                             hotfix_apply_cancellation_after_deployment_is_pinned,
                             random_seed,
+                            linked_from_count,
+                            linked_to_count,
                         },
                     ) => {
                         let (deployment_id, service_protocol_version) = match pinned_deployment {
@@ -1283,6 +1485,8 @@ pub mod v1 {
                             result: None,
                             hotfix_apply_cancellation_after_deployment_is_pinned,
                             random_seed,
+                            linked_from_count,
+                            linked_to_count,
                         }
                     }
                     crate::invocation_status_table::InvocationStatus::Completed(
@@ -1301,6 +1505,8 @@ pub mod v1 {
                             journal_metadata,
                             pinned_deployment,
                             random_seed,
+                            linked_from_count,
+                            linked_to_count,
                         },
                     ) => {
                         let (deployment_id, service_protocol_version) = match pinned_deployment {
@@ -1357,6 +1563,83 @@ pub mod v1 {
                             combinator_type: super::CombinatorType::Unknown.into(),
                             result: Some(response_result.into()),
                             random_seed,
+                            linked_from_count,
+                            linked_to_count,
+                        }
+                    }
+                    crate::invocation_status_table::InvocationStatus::Completing(
+                        crate::invocation_status_table::CompletingInvocation {
+                            invocation_target,
+                            created_using_restate_version,
+                            journal_metadata,
+                            pinned_deployment,
+                            response_sinks,
+                            timestamps,
+                            source,
+                            execution_time,
+                            completion_retention_duration,
+                            journal_retention_duration,
+                            idempotency_key,
+                            random_seed,
+                            response_result,
+                            linked_from_count,
+                            linked_to_count,
+                        },
+                    ) => {
+                        let (deployment_id, service_protocol_version) = match pinned_deployment {
+                            None => (None, None),
+                            Some(pinned_deployment) => (
+                                Some(pinned_deployment.deployment_id.to_string()),
+                                Some(pinned_deployment.service_protocol_version.as_repr()),
+                            ),
+                        };
+
+                        InvocationStatusV2 {
+                            status: invocation_status_v2::Status::Completing.into(),
+                            invocation_target: Some(invocation_target.into()),
+                            source: Some(source.into()),
+                            span_context: Some(journal_metadata.span_context.into()),
+                            creation_time: timestamps.creation_time().as_u64(),
+                            created_using_restate_version: created_using_restate_version
+                                .into_string(),
+                            modification_time: timestamps.modification_time().as_u64(),
+                            inboxed_transition_time: timestamps
+                                .inboxed_transition_time()
+                                .map(|t| t.as_u64()),
+                            scheduled_transition_time: timestamps
+                                .scheduled_transition_time()
+                                .map(|t| t.as_u64()),
+                            running_transition_time: timestamps
+                                .running_transition_time()
+                                .map(|t| t.as_u64()),
+                            completed_transition_time: timestamps
+                                .completed_transition_time()
+                                .map(|t| t.as_u64()),
+                            response_sinks: response_sinks
+                                .into_iter()
+                                .map(|s| ServiceInvocationResponseSink::from(Some(s)))
+                                .collect(),
+                            argument: None,
+                            headers: vec![],
+                            execution_time: execution_time.map(|t| t.as_u64()),
+                            completion_retention_duration: Some(
+                                completion_retention_duration.into(),
+                            ),
+                            journal_retention_duration: Some(journal_retention_duration.into()),
+                            idempotency_key: idempotency_key.map(|key| key.to_string()),
+                            inbox_sequence_number: None,
+                            journal_length: journal_metadata.length,
+                            commands: journal_metadata.commands,
+                            deployment_id,
+                            service_protocol_version,
+                            hotfix_apply_cancellation_after_deployment_is_pinned: false,
+                            waiting_for_completions: vec![],
+                            waiting_for_signal_indexes: vec![],
+                            waiting_for_signal_names: vec![],
+                            result: Some(response_result.into()),
+                            random_seed,
+                            linked_from_count,
+                            linked_to_count,
                         }
                     }
                     crate::invocation_status_table::InvocationStatus::Free => {
@@ -1397,6 +1680,9 @@ pub mod v1 {
                     }
                     invocation_status_v2::Status::Paused => {
                         crate::invocation_status_table::InvocationStatusDiscriminants::Paused
+                    }
+                    invocation_status_v2::Status::Completing => {
+                        crate::invocation_status_table::InvocationStatusDiscriminants::Completing
                     }
                     invocation_status_v2::Status::UnknownStatus => {
                         return Err(ConversionError::unexpected_enum_variant(
@@ -1677,6 +1963,8 @@ pub mod v1 {
                     submit_notification_sink,
                     restate_version,
                     limit_key,
+                    link_from,
+                    link_caller_completion_id,
                 } = value;
 
                 let invocation_id = restate_types::identifiers::InvocationId::try_from(
@@ -1733,6 +2021,8 @@ pub mod v1 {
                 // Scope is persisted as part of InvocationTarget since v1.7.0
                 let limit_key = limit_key.parse().map_err(ConversionError::invalid_data)?;
 
+                let link_from = link_from.map(TryInto::try_into).transpose()?;
+
                 Ok(restate_types::invocation::ServiceInvocation {
                     invocation_id,
                     invocation_target,
@@ -1747,6 +2037,8 @@ pub mod v1 {
                     idempotency_key,
                     limit_key,
                     submit_notification_sink,
+                    link_from,
+                    link_caller_completion_id,
                     restate_version: restate_version_from_pb(restate_version),
                 })
             }
@@ -1775,6 +2067,8 @@ pub mod v1 {
                     journal_retention_duration: Some(value.journal_retention_duration.into()),
                     idempotency_key: value.idempotency_key.map(|s| s.to_string()),
                     submit_notification_sink: value.submit_notification_sink.map(Into::into),
+                    link_from: value.link_from.map(EntityId::from),
+                    link_caller_completion_id: value.link_caller_completion_id,
                     restate_version: value.restate_version.into_string(),
                     limit_key,
                 }
@@ -1809,6 +2103,8 @@ pub mod v1 {
                     journal_retention_duration: Some(value.journal_retention_duration.into()),
                     idempotency_key: value.idempotency_key.as_ref().map(|s| s.to_string()),
                     submit_notification_sink: value.submit_notification_sink.map(Into::into),
+                    link_from: value.link_from.as_ref().map(|e| EntityId::from(e.clone())),
+                    link_caller_completion_id: value.link_caller_completion_id,
                     restate_version: value.restate_version.clone().into_string(),
                     limit_key: value.limit_key.to_string(),
                 }
@@ -2291,6 +2587,51 @@ pub mod v1 {
                             },
                         )
                     }
+                    ResponseSink::ServiceCompletion(target) => {
+                        let service_id = restate_types::identifiers::ServiceId::try_from(
+                            target.service_id.ok_or(ConversionError::missing_field("service_id"))?,
+                        )?;
+                        let handler_name = ByteString::try_from(target.handler_name)
+                            .map_err(ConversionError::invalid_data)?;
+                        let completion_retention_duration = target
+                            .completion_retention_duration
+                            .unwrap_or_default()
+                            .try_into()?;
+                        let journal_retention_duration = target
+                            .journal_retention_duration
+                            .unwrap_or_default()
+                            .try_into()?;
+                        Some(restate_types::invocation::ServiceInvocationResponseSink::ServiceCompletion(
+                            restate_types::invocation::ServiceCompletionTarget {
+                                service_id,
+                                handler_name,
+                                completion_retention_duration,
+                                journal_retention_duration,
+                            },
+                        ))
+                    }
+                    ResponseSink::ServiceLinkNotification(n) => {
+                        let linked_from = restate_types::identifiers::ServiceId::try_from(
+                            n.linked_from
+                                .ok_or(ConversionError::missing_field("linked_from"))?,
+                        )?;
+                        Some(
+                            restate_types::invocation::ServiceInvocationResponseSink::ServiceLinkNotification {
+                                linked_from,
+                            },
+                        )
+                    }
+                    ResponseSink::InvocationLinkNotification(n) => {
+                        let linked_from =
+                            restate_types::identifiers::InvocationId::from_slice(
+                                &n.linked_from,
+                            )?;
+                        Some(
+                            restate_types::invocation::ServiceInvocationResponseSink::InvocationLinkNotification {
+                                linked_from,
+                            },
+                        )
+                    }
                     ResponseSink::None(_) => None,
                 };
 
@@ -2316,6 +2657,24 @@ pub mod v1 {
                     Some(restate_types::invocation::ServiceInvocationResponseSink::Ingress {  request_id }) => {
                         ResponseSink::Ingress(Ingress {
                             request_id: Bytes::copy_from_slice(&request_id.to_bytes())
+                        })
+                    },
+                    Some(restate_types::invocation::ServiceInvocationResponseSink::ServiceCompletion(target)) => {
+                        ResponseSink::ServiceCompletion(super::ServiceCompletionTarget {
+                            service_id: Some(ServiceId::from(target.service_id)),
+                            handler_name: target.handler_name.into_bytes(),
+                            completion_retention_duration: Some(target.completion_retention_duration.into()),
+                            journal_retention_duration: Some(target.journal_retention_duration.into()),
+                        })
+                    },
+                    Some(restate_types::invocation::ServiceInvocationResponseSink::ServiceLinkNotification { linked_from }) => {
+                        ResponseSink::ServiceLinkNotification(ServiceLinkNotification {
+                            linked_from: Some(ServiceId::from(linked_from)),
+                        })
+                    },
+                    Some(restate_types::invocation::ServiceInvocationResponseSink::InvocationLinkNotification { linked_from }) => {
+                        ResponseSink::InvocationLinkNotification(InvocationLinkNotification {
+                            linked_from: linked_from.into(),
                         })
                     },
                     None => ResponseSink::None(Default::default()),
@@ -2345,6 +2704,24 @@ pub mod v1 {
                     Some(restate_types::invocation::ServiceInvocationResponseSink::Ingress {  request_id }) => {
                         ResponseSink::Ingress(Ingress {
                             request_id: Bytes::copy_from_slice(&request_id.to_bytes())
+                        })
+                    },
+                    Some(restate_types::invocation::ServiceInvocationResponseSink::ServiceCompletion(target)) => {
+                        ResponseSink::ServiceCompletion(super::ServiceCompletionTarget {
+                            service_id: Some(ServiceId::from(target.service_id.clone())),
+                            handler_name: target.handler_name.clone().into_bytes(),
+                            completion_retention_duration: Some(target.completion_retention_duration.into()),
+                            journal_retention_duration: Some(target.journal_retention_duration.into()),
+                        })
+                    },
+                    Some(restate_types::invocation::ServiceInvocationResponseSink::ServiceLinkNotification { linked_from }) => {
+                        ResponseSink::ServiceLinkNotification(ServiceLinkNotification {
+                            linked_from: Some(ServiceId::from(linked_from.clone())),
+                        })
+                    },
+                    Some(restate_types::invocation::ServiceInvocationResponseSink::InvocationLinkNotification { linked_from }) => {
+                        ResponseSink::InvocationLinkNotification(InvocationLinkNotification {
+                            linked_from: (*linked_from).into(),
                         })
                     },
                     None => ResponseSink::None(Default::default()),
@@ -3077,6 +3454,54 @@ pub mod v1 {
                             ),
                         )
                     }
+                    EntryType::LinkServiceCommand => {
+                        journal_v2::EntryType::Command(journal_v2::CommandType::LinkService)
+                    }
+                    EntryType::LinkServiceCompletion => journal_v2::EntryType::Notification(
+                        journal_v2::NotificationType::Completion(
+                            journal_v2::CompletionType::LinkService,
+                        ),
+                    ),
+                    EntryType::UnlinkServiceCommand => {
+                        journal_v2::EntryType::Command(journal_v2::CommandType::UnlinkService)
+                    }
+                    EntryType::UnlinkServiceCompletion => journal_v2::EntryType::Notification(
+                        journal_v2::NotificationType::Completion(
+                            journal_v2::CompletionType::UnlinkService,
+                        ),
+                    ),
+                    EntryType::UnlinkInvocationCommand => {
+                        journal_v2::EntryType::Command(journal_v2::CommandType::UnlinkInvocation)
+                    }
+                    EntryType::UnlinkInvocationCompletion => journal_v2::EntryType::Notification(
+                        journal_v2::NotificationType::Completion(
+                            journal_v2::CompletionType::UnlinkInvocation,
+                        ),
+                    ),
+                    EntryType::CompleteServiceCommand => {
+                        journal_v2::EntryType::Command(journal_v2::CommandType::CompleteService)
+                    }
+                    EntryType::CompleteServiceCompletion => journal_v2::EntryType::Notification(
+                        journal_v2::NotificationType::Completion(
+                            journal_v2::CompletionType::CompleteService,
+                        ),
+                    ),
+                    EntryType::StartLinkedCommand => {
+                        journal_v2::EntryType::Command(journal_v2::CommandType::StartLinked)
+                    }
+                    EntryType::StartLinkedCompletion => journal_v2::EntryType::Notification(
+                        journal_v2::NotificationType::Completion(
+                            journal_v2::CompletionType::StartLinked,
+                        ),
+                    ),
+                    EntryType::AttachServiceCommand => {
+                        journal_v2::EntryType::Command(journal_v2::CommandType::AttachService)
+                    }
+                    EntryType::AttachServiceCompletion => journal_v2::EntryType::Notification(
+                        journal_v2::NotificationType::Completion(
+                            journal_v2::CompletionType::AttachService,
+                        ),
+                    ),
                 })
             }
         }
@@ -3144,6 +3569,54 @@ pub mod v1 {
                     journal_v2::EntryType::Command(journal_v2::CommandType::CompleteAwakeable) => {
                         EntryType::CompleteAwakeableCommand
                     }
+                    journal_v2::EntryType::Command(journal_v2::CommandType::LinkService) => {
+                        EntryType::LinkServiceCommand
+                    }
+                    journal_v2::EntryType::Command(journal_v2::CommandType::UnlinkService) => {
+                        EntryType::UnlinkServiceCommand
+                    }
+                    journal_v2::EntryType::Notification(
+                        journal_v2::NotificationType::Completion(
+                            journal_v2::CompletionType::UnlinkService,
+                        ),
+                    ) => EntryType::UnlinkServiceCompletion,
+                    journal_v2::EntryType::Command(journal_v2::CommandType::UnlinkInvocation) => {
+                        EntryType::UnlinkInvocationCommand
+                    }
+                    journal_v2::EntryType::Notification(
+                        journal_v2::NotificationType::Completion(
+                            journal_v2::CompletionType::UnlinkInvocation,
+                        ),
+                    ) => EntryType::UnlinkInvocationCompletion,
+                    journal_v2::EntryType::Command(journal_v2::CommandType::CompleteService) => {
+                        EntryType::CompleteServiceCommand
+                    }
+                    journal_v2::EntryType::Notification(
+                        journal_v2::NotificationType::Completion(
+                            journal_v2::CompletionType::LinkService,
+                        ),
+                    ) => EntryType::LinkServiceCompletion,
+                    journal_v2::EntryType::Notification(
+                        journal_v2::NotificationType::Completion(
+                            journal_v2::CompletionType::CompleteService,
+                        ),
+                    ) => EntryType::CompleteServiceCompletion,
+                    journal_v2::EntryType::Command(journal_v2::CommandType::StartLinked) => {
+                        EntryType::StartLinkedCommand
+                    }
+                    journal_v2::EntryType::Notification(
+                        journal_v2::NotificationType::Completion(
+                            journal_v2::CompletionType::StartLinked,
+                        ),
+                    ) => EntryType::StartLinkedCompletion,
+                    journal_v2::EntryType::Command(journal_v2::CommandType::AttachService) => {
+                        EntryType::AttachServiceCommand
+                    }
+                    journal_v2::EntryType::Notification(
+                        journal_v2::NotificationType::Completion(
+                            journal_v2::CompletionType::AttachService,
+                        ),
+                    ) => EntryType::AttachServiceCompletion,
                     journal_v2::EntryType::Notification(
                         journal_v2::NotificationType::Completion(
                             journal_v2::CompletionType::GetLazyState,
@@ -3251,6 +3724,9 @@ pub mod v1 {
                         journal_v2::EntryType::Command(ct @ journal_v2::CommandType::Call)
                         | journal_v2::EntryType::Command(
                             ct @ journal_v2::CommandType::OneWayCall,
+                        )
+                        | journal_v2::EntryType::Command(
+                            ct @ journal_v2::CommandType::StartLinked,
                         ) => restate_types::storage::StoredRawEntry::new(
                             header,
                             journal_v2::raw::RawCommand::new(ct, value.content)
@@ -3597,6 +4073,147 @@ pub mod v1 {
                     outbox_message::OutboxMessage::NotifySignal(notify_signal) => {
                         crate::outbox_table::OutboxMessage::NotifySignal(notify_signal.try_into()?)
                     }
+                    outbox_message::OutboxMessage::UnlinkRequest(req) => {
+                        crate::outbox_table::OutboxMessage::UnlinkRequest(
+                            restate_types::invocation::UnlinkRequest {
+                                linked_to: req
+                                    .linked_to
+                                    .ok_or(ConversionError::missing_field("linked_to"))?
+                                    .try_into()?,
+                                linked_from: req
+                                    .linked_from
+                                    .ok_or(ConversionError::missing_field("linked_from"))?
+                                    .try_into()?,
+                                caller_invocation_id:
+                                    restate_types::identifiers::InvocationId::try_from(
+                                        req.caller_invocation_id.ok_or(
+                                            ConversionError::missing_field("caller_invocation_id"),
+                                        )?,
+                                    )?,
+                                caller_completion_id: req.caller_completion_id,
+                            },
+                        )
+                    }
+                    outbox_message::OutboxMessage::UnlinkResponse(resp) => {
+                        crate::outbox_table::OutboxMessage::UnlinkResponse(
+                            restate_types::invocation::UnlinkResponse {
+                                linked_from: resp
+                                    .linked_from
+                                    .ok_or(ConversionError::missing_field("linked_from"))?
+                                    .try_into()?,
+                                caller_invocation_id:
+                                    restate_types::identifiers::InvocationId::try_from(
+                                        resp.caller_invocation_id.ok_or(
+                                            ConversionError::missing_field("caller_invocation_id"),
+                                        )?,
+                                    )?,
+                                completion_id: resp.completion_id,
+                                result: match resp.failure {
+                                    None => Ok(()),
+                                    Some(f) => Err(InvocationError::new(f.error_code, f.message)),
+                                },
+                            },
+                        )
+                    }
+                    outbox_message::OutboxMessage::LinkRequest(req) => {
+                        crate::outbox_table::OutboxMessage::LinkRequest(
+                            restate_types::invocation::LinkRequest {
+                                link_to: req
+                                    .link_to
+                                    .ok_or(ConversionError::missing_field("link_to"))?
+                                    .try_into()?,
+                                link_from: req
+                                    .link_from
+                                    .ok_or(ConversionError::missing_field("link_from"))?
+                                    .try_into()?,
+                                caller_invocation_id:
+                                    restate_types::identifiers::InvocationId::try_from(
+                                        req.caller_invocation_id.ok_or(
+                                            ConversionError::missing_field("caller_invocation_id"),
+                                        )?,
+                                    )?,
+                                caller_completion_id: req.caller_completion_id,
+                                handler_sink: req
+                                    .handler_sink
+                                    .map(|t| -> Result<_, ConversionError> {
+                                        let service_id =
+                                            restate_types::identifiers::ServiceId::try_from(
+                                                t.service_id.ok_or(
+                                                    ConversionError::missing_field("service_id"),
+                                                )?,
+                                            )?;
+                                        let handler_name = ByteString::try_from(t.handler_name)
+                                            .map_err(ConversionError::invalid_data)?;
+                                        let completion_retention_duration = t
+                                            .completion_retention_duration
+                                            .unwrap_or_default()
+                                            .try_into()?;
+                                        let journal_retention_duration = t
+                                            .journal_retention_duration
+                                            .unwrap_or_default()
+                                            .try_into()?;
+                                        Ok(restate_types::invocation::ServiceCompletionTarget {
+                                            service_id,
+                                            handler_name,
+                                            completion_retention_duration,
+                                            journal_retention_duration,
+                                        })
+                                    })
+                                    .transpose()?,
+                            },
+                        )
+                    }
+                    outbox_message::OutboxMessage::LinkResponse(resp) => {
+                        crate::outbox_table::OutboxMessage::LinkResponse(
+                            restate_types::invocation::LinkResponse {
+                                linked_from: resp
+                                    .linked_from
+                                    .ok_or(ConversionError::missing_field("linked_from"))?
+                                    .try_into()?,
+                                linked_to: resp
+                                    .linked_to
+                                    .ok_or(ConversionError::missing_field("linked_to"))?
+                                    .try_into()?,
+                                caller_invocation_id: resp
+                                    .caller_invocation_id
+                                    .ok_or(ConversionError::missing_field("caller_invocation_id"))?
+                                    .try_into()?,
+                                completion_id: resp.completion_id,
+                                result: match resp.failure {
+                                    None => Ok(()),
+                                    Some(f) => Err(InvocationError::new(f.error_code, f.message)),
+                                },
+                            },
+                        )
+                    }
+                    outbox_message::OutboxMessage::LinkCompletionNotification(notif) => {
+                        crate::outbox_table::OutboxMessage::LinkCompletionNotification(
+                            restate_types::invocation::LinkCompletionNotification {
+                                linked_from: notif
+                                    .linked_from
+                                    .ok_or(ConversionError::missing_field("linked_from"))?
+                                    .try_into()?,
+                                linked_to: notif
+                                    .linked_to
+                                    .ok_or(ConversionError::missing_field("linked_to"))?
+                                    .try_into()?,
+                            },
+                        )
+                    }
+                    outbox_message::OutboxMessage::AttachServiceRequest(req) => {
+                        crate::outbox_table::OutboxMessage::AttachServiceRequest(
+                            restate_types::invocation::AttachServiceRequest {
+                                caller_id: restate_types::identifiers::InvocationId::try_from(
+                                    req.caller_id
+                                        .ok_or(ConversionError::missing_field("caller_id"))?,
+                                )?,
+                                completion_id: req.completion_id,
+                                target: restate_types::identifiers::ServiceId::try_from(
+                                    req.target.ok_or(ConversionError::missing_field("target"))?,
+                                )?,
+                            },
+                        )
+                    }
                 };
 
                 Ok(result)
@@ -3659,6 +4276,90 @@ pub mod v1 {
                     ),
                     crate::outbox_table::OutboxMessage::NotifySignal(notify_signal) => {
                         outbox_message::OutboxMessage::NotifySignal(notify_signal.into())
+                    }
+                    crate::outbox_table::OutboxMessage::UnlinkRequest(req) => {
+                        outbox_message::OutboxMessage::UnlinkRequest(
+                            outbox_message::UnlinkRequest {
+                                linked_to: Some(EntityId::from(req.linked_to)),
+                                linked_from: Some(EntityId::from(req.linked_from)),
+                                caller_invocation_id: Some(InvocationId::from(
+                                    req.caller_invocation_id,
+                                )),
+                                caller_completion_id: req.caller_completion_id,
+                            },
+                        )
+                    }
+                    crate::outbox_table::OutboxMessage::UnlinkResponse(resp) => {
+                        outbox_message::OutboxMessage::UnlinkResponse(
+                            outbox_message::UnlinkResponse {
+                                linked_from: Some(EntityId::from(resp.linked_from)),
+                                caller_invocation_id: Some(InvocationId::from(
+                                    resp.caller_invocation_id,
+                                )),
+                                completion_id: resp.completion_id,
+                                failure: resp.result.err().map(|e| {
+                                    outbox_message::unlink_response::Failure {
+                                        error_code: e.code().into(),
+                                        message: e.message().to_string(),
+                                    }
+                                }),
+                            },
+                        )
+                    }
+                    crate::outbox_table::OutboxMessage::LinkRequest(req) => {
+                        outbox_message::OutboxMessage::LinkRequest(outbox_message::LinkRequest {
+                            link_to: Some(EntityId::from(req.link_to)),
+                            link_from: Some(EntityId::from(req.link_from)),
+                            caller_invocation_id: Some(InvocationId::from(
+                                req.caller_invocation_id,
+                            )),
+                            caller_completion_id: req.caller_completion_id,
+                            handler_sink: req.handler_sink.map(|t| {
+                                super::ServiceCompletionTarget {
+                                    service_id: Some(ServiceId::from(t.service_id)),
+                                    handler_name: t.handler_name.into_bytes(),
+                                    completion_retention_duration: Some(
+                                        t.completion_retention_duration.into(),
+                                    ),
+                                    journal_retention_duration: Some(
+                                        t.journal_retention_duration.into(),
+                                    ),
+                                }
+                            }),
+                        })
+                    }
+                    crate::outbox_table::OutboxMessage::LinkResponse(resp) => {
+                        outbox_message::OutboxMessage::LinkResponse(outbox_message::LinkResponse {
+                            linked_from: Some(EntityId::from(resp.linked_from)),
+                            linked_to: Some(EntityId::from(resp.linked_to)),
+                            caller_invocation_id: Some(InvocationId::from(
+                                resp.caller_invocation_id,
+                            )),
+                            completion_id: resp.completion_id,
+                            failure: resp.result.err().map(|e| {
+                                outbox_message::link_response::Failure {
+                                    error_code: e.code().into(),
+                                    message: e.message().to_string(),
+                                }
+                            }),
+                        })
+                    }
+                    crate::outbox_table::OutboxMessage::LinkCompletionNotification(notif) => {
+                        outbox_message::OutboxMessage::LinkCompletionNotification(
+                            LinkCompletionNotification {
+                                linked_from: Some(EntityId::from(notif.linked_from)),
+                                linked_to: Some(EntityId::from(notif.linked_to)),
+                            },
+                        )
+                    }
+                    crate::outbox_table::OutboxMessage::AttachServiceRequest(req) => {
+                        outbox_message::OutboxMessage::AttachServiceRequest(
+                            outbox_message::AttachServiceRequest {
+                                caller_id: Some(InvocationId::from(req.caller_id)),
+                                completion_id: req.completion_id,
+                                target: Some(ServiceId::from(req.target)),
+                            },
+                        )
                     }
                 };
 
@@ -4367,6 +5068,7 @@ pub mod v1 {
                     | Status::Invoked
                     | Status::Suspended
                     | Status::Paused
+                    | Status::Completing
                     | Status::Completed => {}
                     Status::UnknownStatus => return Ok(None),
                 }
@@ -4389,6 +5091,7 @@ pub mod v1 {
                     | Status::Invoked
                     | Status::Suspended
                     | Status::Paused
+                    | Status::Completing
                     | Status::Completed => {}
                     Status::UnknownStatus => {
                         return Err(ConversionError::invalid_data_static("status"));

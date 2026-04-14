@@ -10,6 +10,9 @@
 
 use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext, entries};
 use restate_storage_api::fsm_table::WriteFsmTable;
+use restate_storage_api::invocation_edges_table::{
+    ReadInvocationEdgesTable, WriteInvocationEdgesTable,
+};
 use restate_storage_api::invocation_status_table::{
     InvocationStatus, ReadInvocationStatusTable, WriteInvocationStatusTable,
 };
@@ -18,17 +21,24 @@ use restate_storage_api::journal_table_v2;
 use restate_storage_api::lock_table::WriteLockTable;
 use restate_storage_api::outbox_table::WriteOutboxTable;
 use restate_storage_api::promise_table::{ReadPromiseTable, WritePromiseTable};
+use restate_storage_api::service_edges_table::{ReadServiceEdgesTable, WriteServiceEdgesTable};
+use restate_storage_api::service_status_table::{
+    ReadVirtualObjectStatusTable, WriteVirtualObjectStatusTable,
+};
 use restate_storage_api::state_table::{ReadStateTable, WriteStateTable};
 use restate_storage_api::timer_table::WriteTimerTable;
 use restate_storage_api::vqueue_table::{ReadVQueueTable, WriteVQueueTable};
 use restate_types::errors::NOT_READY_INVOCATION_ERROR;
 use restate_types::identifiers::InvocationId;
-use restate_types::invocation::ResponseResult;
+use restate_types::invocation::{EntityId, ResponseResult};
 use restate_types::journal_v2;
 use restate_types::journal_v2::{
-    AttachInvocationCompletion, AttachInvocationResult, CallCompletion, CallResult, CommandType,
-    CompletionId, GetInvocationOutputCompletion, GetInvocationOutputResult, GetPromiseCompletion,
-    GetPromiseResult, SleepCompletion,
+    AttachInvocationCompletion, AttachInvocationResult, AttachServiceCompletion,
+    AttachServiceResult, CallCompletion, CallResult, CommandType, CompleteServiceCompletion,
+    CompleteServiceResult, CompletionId, GetInvocationOutputCompletion, GetInvocationOutputResult,
+    GetPromiseCompletion, GetPromiseResult, LinkServiceCompletion, LinkServiceResult,
+    SleepCompletion, StartLinkedCompletion, StartLinkedResult, UnlinkInvocationCompletion,
+    UnlinkInvocationResult, UnlinkServiceCompletion, UnlinkServiceResult,
 };
 use tracing::error;
 
@@ -37,6 +47,9 @@ pub struct OnNotifyInvocationResponse {
     pub status: InvocationStatus,
     pub caller_completion_id: CompletionId,
     pub result: ResponseResult,
+    /// Present only when this response comes from a `LinkResponse` — carries the child's
+    /// `EntityId` needed to construct `StartLinkedResult::Success`.
+    pub linked_to: Option<EntityId>,
 }
 
 impl<'ctx, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
@@ -57,7 +70,13 @@ where
         + WriteOutboxTable
         + WriteVQueueTable
         + WriteLockTable
-        + ReadVQueueTable,
+        + ReadVQueueTable
+        + ReadServiceEdgesTable
+        + WriteServiceEdgesTable
+        + ReadInvocationEdgesTable
+        + WriteInvocationEdgesTable
+        + ReadVirtualObjectStatusTable
+        + WriteVirtualObjectStatusTable,
 {
     async fn apply(self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
         let OnNotifyInvocationResponse {
@@ -65,6 +84,7 @@ where
             status,
             caller_completion_id,
             result,
+            linked_to,
         } = self;
 
         // This code needs to be revisited once we remove Service Protocol <= V3, depending on what we still want to carry in InvocationResponse.
@@ -127,6 +147,76 @@ where
                     }
                     .into()
                 }
+                CommandType::LinkService => LinkServiceCompletion {
+                    completion_id: caller_completion_id,
+                    result: match result {
+                        ResponseResult::Success(_) => {
+                            let entity = linked_to
+                                .expect("linked_to must be set for LinkService success completion");
+                            match entity {
+                                EntityId::Object(service_id) => {
+                                    LinkServiceResult::Success(service_id)
+                                }
+                                _ => {
+                                    unreachable!("LinkService always targets a VO, got {entity:?}")
+                                }
+                            }
+                        }
+                        ResponseResult::Failure(err) => LinkServiceResult::Failure(err.into()),
+                    },
+                }
+                .into(),
+                CommandType::CompleteService => CompleteServiceCompletion {
+                    completion_id: caller_completion_id,
+                    result: match result {
+                        ResponseResult::Success(_) => CompleteServiceResult::Void,
+                        ResponseResult::Failure(err) => CompleteServiceResult::Failure(err.into()),
+                    },
+                }
+                .into(),
+                CommandType::StartLinked => StartLinkedCompletion {
+                    completion_id: caller_completion_id,
+                    result: match result {
+                        ResponseResult::Success(_) => {
+                            let entity = linked_to
+                                .expect("linked_to must be set for StartLinked success completion");
+                            match entity {
+                                EntityId::WorkflowInvocation(invocation_id) => {
+                                    StartLinkedResult::Success(invocation_id)
+                                }
+                                _ => {
+                                    unreachable!("StartLinked always targets a WI, got {entity:?}")
+                                }
+                            }
+                        }
+                        ResponseResult::Failure(err) => StartLinkedResult::Failure(err.into()),
+                    },
+                }
+                .into(),
+                CommandType::UnlinkService => UnlinkServiceCompletion {
+                    completion_id: caller_completion_id,
+                    result: match result {
+                        ResponseResult::Success(_) => UnlinkServiceResult::Void,
+                        ResponseResult::Failure(err) => UnlinkServiceResult::Failure(err.into()),
+                    },
+                }
+                .into(),
+                CommandType::UnlinkInvocation => UnlinkInvocationCompletion {
+                    completion_id: caller_completion_id,
+                    result: match result {
+                        ResponseResult::Success(_) => UnlinkInvocationResult::Void,
+                        ResponseResult::Failure(err) => UnlinkInvocationResult::Failure(err.into()),
+                    },
+                }
+                .into(),
+                CommandType::AttachService => AttachServiceCompletion {
+                    completion_id: caller_completion_id,
+                    result: match result {
+                        ResponseResult::Success(bytes) => AttachServiceResult::Success(bytes),
+                        ResponseResult::Failure(err) => AttachServiceResult::Failure(err.into()),
+                    },
+                }
+                .into(),
                 cmd_ty => {
                     error!(
                         "Got an invocation response, the command type {cmd_ty} is unexpected for completion index {}. This indicates storage corruption.",

@@ -49,6 +49,7 @@ where
             }
             Ok(
                 InvocationStatus::Completed(_)
+                | InvocationStatus::Completing(_)
                 | InvocationStatus::Scheduled(_)
                 | InvocationStatus::Inboxed(_),
             ) => {

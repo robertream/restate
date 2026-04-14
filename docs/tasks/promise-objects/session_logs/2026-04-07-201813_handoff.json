@@ -1,0 +1,56 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-07-201813",
+  "branch_name": "promise-objects",
+  "task_name": "promise-objects",
+  "session_number": 1,
+  "progress_update": {
+    "summary": "Reviewed promise-objects branch which already has full implementation from a previous session (4 commits on top of linked-workflows). Fixed non-standard proto field numbers in ResolveCommandMessage and ResolveCompletionNotificationMessage that were flagged by the SDK agent working on sdk-shared-core. All 19 linked workflow tests passing.",
+    "goal": "Implement promise objects with ResolveCommand, resolved state tracking, mutation rejection, and GC on RemoveParentLink. Coordinate proto definitions with sdk-shared-core.",
+    "accomplished": [
+      "Confirmed promise-objects branch has full implementation: ResolveCommand, mutation rejection, GC cascade, shared handler rejection",
+      "Fixed ResolveCommandMessage.result_completion_id from field 1 to field 11 (standard slot for completable commands)",
+      "Fixed ResolveCompletionNotificationMessage result fields from void=13/failure=15 to void=4/failure=6 (standard notification slots)",
+      "Added required reserved field declarations to ResolveCompletionNotificationMessage",
+      "Verified all 19 linked workflow tests pass after proto changes"
+    ],
+    "now": "Completed proto field number standardization. SDK agent has a slightly different reserved declaration (missing fields 7, 8) that should be aligned.",
+    "next_steps": [
+      "Align reserved field declaration with sdk-shared-core (we have 2,3,5,7,8,12,16,17 — they have 2,3,5,12,16,17)",
+      "SDK implementation: TypeScript/Java/Python support for resolve in sdk-shared-core",
+      "Integration testing between server and SDK with standardized proto",
+      "Implement get_first_parent() replacing has_parents() in ReadLinkTable trait"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Proto field numbers must match between server and sdk-shared-core — both sides now use standard conventions",
+      "ResolveCompletionNotification reserved fields: server includes 7,8 which SDK omits — server version is more conservative/correct"
+    ],
+    "decisions": [
+      "ResolveCommandMessage uses same wire layout as OutputCommandMessage plus result_completion_id=11 (completable+fallible)",
+      "Reserved fields in ResolveCompletionNotificationMessage follow CompletePromiseCompletionNotificationMessage pattern (most conservative)"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Should SDK align to server's reserved declaration (add fields 7, 8) or should we drop them to match SDK?"
+    ],
+    "risks": []
+  },
+  "working_set": {
+    "key_files": [
+      "service-protocol/dev/restate/service/protocol.proto",
+      "crates/worker/src/partition/state_machine/entries/resolve_command.rs",
+      "crates/worker/src/partition/state_machine/tests/linked_workflows.rs",
+      "crates/service-protocol-v4/src/entry_codec.rs"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "cargo check -p restate-service-protocol-v4 -p restate-worker --all-targets",
+      "cargo nextest run -p restate-worker linked_workflow -p restate-service-protocol-v4"
+    ]
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "d72befbdc"
+  }
+}

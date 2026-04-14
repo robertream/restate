@@ -1,0 +1,101 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-05-171234",
+  "branch_name": "linked-workflows",
+  "task_name": "linked-workflows",
+  "session_number": 8,
+  "continuity": {
+    "started": "2026-04-02",
+    "sessions_reviewed": 3,
+    "arc_goal": "Implement linked workflows with complete lifecycle management: MVP (create/complete/cancel/remove), post-MVP (LinkCommand with deferred completion, onCompleted handler design for VOs, bidirectional link records, purge guard, cross-partition cleanup, cycle prevention). Feature complete with clean commits."
+  },
+  "progress_update": {
+    "summary": "We implemented the LinkCommand handler and LinkedNotification handler, replacing the todo!() stubs. Added two integration tests (happy path + rejection), addressed all code review findings, and removed dead ChildOf-write code from the AttachInvocation path. Then designed the onCompleted handler feature for VOs — iterated through several design simplifications including new link types (LinkRelation/ChildStatus replacing EdgeLabel/LinkState), storing handler name on ParentOf record instead of response sinks, and eliminating sink removal entirely.",
+    "goal": "Linked workflows with lifecycle management: bidirectional links, purge guard, cross-partition cleanup, cycle prevention, LinkCommand with deferred completion, and onCompleted handler design for VOs.",
+    "accomplished": [
+      "Implemented on_linked_notification handler: Ok delivers SDK completion via InvocationResponse, Err deletes ParentOf and delivers error completion",
+      "Fixed workflow duplicate rejection path to send LinkedNotification Err for Link sinks instead of going through send_response_to_sinks",
+      "Added CommandType::Link to OnNotifyInvocationResponse for journal completion delivery",
+      "Added 2 integration tests: link_command_happy_path_with_linked_notification and link_command_rejection_via_linked_notification_err",
+      "Removed dead ChildOf write from handle_attach_invocation_request, updated tests to use direct insert_incoming_link helper",
+      "Designed onCompleted handler feature with simplified architecture: handler name on ParentOf record, fired from on_link_completion_notification, no sink changes needed"
+    ],
+    "now": "Completed plan review of vo_child_link_on_completed.md design doc. All review findings addressed and doc updated. Ready for implementation.",
+    "next_steps": [
+      "Implement onCompleted: refactor EdgeLabel+LinkState → LinkRelation+ChildStatus, add completion_handler_name to LinkCommand, emit handler invocation from on_link_completion_notification",
+      "Add ServiceInvocation::internal_handler_invocation factory method, fix HandlerInvocation sink failure encoding to use proto-encoded Failure",
+      "Consider squashing linked-workflows branch commits before merge to main",
+      "SDK implementation: TypeScript/Java/Python support for linkWorkflow/removeLink/onCompleted"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "LinkRelation key_byte() must match existing EdgeLabel::as_key_byte() for RocksDB prefix scan compatibility",
+      "ChildOf records carry no state — type system enforces this via LinkRelation::ChildOf having no fields",
+      "CompletionHandlerName lives only in ChildStatus::Running — consumed at Running→Completed transition",
+      "No server-side validation of VO-only for completion_handler_name — SDK controls the API surface",
+      "Handler argument encoding: Success = raw output bytes, Failure = proto-encoded Failure message bytes",
+      "edge_label is part of RocksDB key for directed prefix scans",
+      "are_linked does two point reads (ParentOf + ChildOf)",
+      "VO clear state only deletes ParentOf links, preserves ChildOf",
+      "Check-before-write on ChildOf in AttachInvocation prevents race condition overwrite",
+      "Direct cycles prevented by key collision; transitive cycles not detected",
+      "Cross-partition links from day one — all link operations use outbox messages",
+      "Only workflows can enter Completing — VOs complete immediately regardless of links",
+      "Links keyed by (local_service_id, remote_service_id, edge_label) with edge_label in key",
+      "HandlerInvocation creates Exclusive handler invocation on parent VO",
+      "Restart-as-new disallowed on linked workflows"
+    ],
+    "decisions": [
+      "Store completion_handler_name on ParentOf record, not on response sinks — eliminates sink removal, RemoveParentLink changes, and send_response_to_sinks modifications entirely",
+      "Type refactoring: EdgeLabel+LinkState → LinkRelation(ParentOf(ChildStatus)|ChildOf) + ChildStatus(Running(Option<CompletionHandlerName>)|Completed(ResponseResult))",
+      "ChildStatus::complete() method for state transition — consumes Running, yields Completed + handler name by ownership",
+      "ServiceInvocation::internal_handler_invocation factory — shared between HandlerInvocation sink and on_link_completion_notification",
+      "Fix HandlerInvocation sink to pass proto-encoded Failure instead of Bytes::new() — unreleased code, no backward compat concern",
+      "No VO-only validation at server level — SDK controls which parent types can set completion_handler_name",
+      "EdgeLabel::ParentOf/ChildOf enum with local_service_id/remote_service_id naming",
+      "are_linked(a, b) checks both directions — used for cycle prevention in CreateLink",
+      "VO clear state preserves ChildOf records — only deletes outgoing ParentOf links and notifies children",
+      "Removed label field entirely — links identified by child_service_id, not arbitrary label string",
+      "Extracted cancel_linked_children helper used by cancel (Invoked/Suspended/Paused + Completing) and kill (Completing)",
+      "Link barrier check moved outside sinks/retention guard — workflows always enter Completing with running links",
+      "No active_children_count — query link table for Running links instead of maintaining denormalized counter",
+      "Completion delivers Result<T, E> only — no status field, no inline frozen graph",
+      "Completing variant carries InFlightInvocationMetadata + buffered ResponseResult",
+      "RemoveLink included in MVP — graph curation is load-bearing",
+      "End-to-end integration test included in MVP scope",
+      "Cancellation is local per node — each node cancels its own direct children",
+      "HandlerInvocation targets VirtualObjectHandlerType::Exclusive — handler runs under object's exclusive lock",
+      "CreateLink proto uses result_completion_id field (not RawCommand metadata) matching AttachInvocation pattern",
+      "Lite decoding for CreateLink/RemoveLink returns graceful DecodingError — DataFusion skips these entries"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Failure argument encoding for onCompleted: decided proto-encoded Failure message bytes, but need to verify encode_failure_proto helper exists or create it",
+      "Graph traversal API — how does a parent inspect the frozen state graph of completed children? (deferred)",
+      "Orphan GC policy — default timeout for orphaned workflows? (deferred)"
+    ],
+    "risks": []
+  },
+  "working_set": {
+    "key_files": [
+      "crates/worker/src/partition/state_machine/mod.rs",
+      "crates/worker/src/partition/state_machine/entries/link_command.rs",
+      "crates/worker/src/partition/state_machine/lifecycle/notify_invocation_response.rs",
+      "crates/worker/src/partition/state_machine/tests/linked_workflows.rs",
+      "crates/storage-api/src/link_table/mod.rs",
+      "crates/storage-api/proto/dev/restate/storage/v1/domain.proto",
+      "docs/design/vo_child_link_on_completed.md",
+      "docs/plans/specs/plan_link_command.md"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "cargo nextest run -p restate-worker linked_workflow -p restate-partition-store link_table",
+      "cargo clippy -p restate-worker --all-targets -- -D warnings",
+      "cargo fmt --all -- --check"
+    ]
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "861decceb"
+  }
+}

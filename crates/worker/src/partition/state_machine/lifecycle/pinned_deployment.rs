@@ -12,6 +12,9 @@ use tracing::trace;
 
 use restate_storage_api::fsm_table::WriteFsmTable;
 use restate_storage_api::inbox_table::WriteInboxTable;
+use restate_storage_api::invocation_edges_table::{
+    ReadInvocationEdgesTable, WriteInvocationEdgesTable,
+};
 use restate_storage_api::invocation_status_table::{
     InvocationStatus, ReadInvocationStatusTable, WriteInvocationStatusTable,
 };
@@ -19,7 +22,10 @@ use restate_storage_api::journal_events::WriteJournalEventsTable;
 use restate_storage_api::lock_table::WriteLockTable;
 use restate_storage_api::outbox_table::WriteOutboxTable;
 use restate_storage_api::promise_table::{ReadPromiseTable, WritePromiseTable};
-use restate_storage_api::service_status_table::WriteVirtualObjectStatusTable;
+use restate_storage_api::service_edges_table::{ReadServiceEdgesTable, WriteServiceEdgesTable};
+use restate_storage_api::service_status_table::{
+    ReadVirtualObjectStatusTable, WriteVirtualObjectStatusTable,
+};
 use restate_storage_api::state_table::{ReadStateTable, WriteStateTable};
 use restate_storage_api::timer_table::WriteTimerTable;
 use restate_storage_api::vqueue_table::{EntryStatusHeader, ReadVQueueTable, WriteVQueueTable};
@@ -63,7 +69,12 @@ where
         + ReadVQueueTable
         + WriteVQueueTable
         + WriteLockTable
-        + WritePromiseTable,
+        + WritePromiseTable
+        + ReadVirtualObjectStatusTable
+        + ReadServiceEdgesTable
+        + WriteServiceEdgesTable
+        + ReadInvocationEdgesTable
+        + WriteInvocationEdgesTable,
 {
     async fn apply(self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
         let mut in_flight_invocation_metadata = self

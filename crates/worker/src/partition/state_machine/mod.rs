@@ -36,11 +36,16 @@ use restate_limiter::RuleBook;
 use crate::rule_book_cache::RuleBookCacheHandle;
 use restate_service_protocol::codec::ProtobufRawEntryCodec;
 use restate_service_protocol_v4::entry_codec::ServiceProtocolV4Codec;
+use restate_storage_api::LinkedServicesStorage;
 use restate_storage_api::fsm_table::WriteFsmTable;
+use restate_storage_api::idempotency_table::{IdempotencyTable, ReadOnlyIdempotencyTable};
 use restate_storage_api::inbox_table::{InboxEntry, ReadInboxTable, WriteInboxTable};
+use restate_storage_api::invocation_edges_table::{
+    ReadInvocationEdgesTable, WriteInvocationEdgesTable,
+};
 use restate_storage_api::invocation_status_table::{
-    CompletedInvocation, InFlightInvocationMetadata, InboxedInvocation, JournalMetadata,
-    JournalRetentionPolicy, PreFlightInvocationArgument, PreFlightInvocationInput,
+    CompletedInvocation, CompletingInvocation, InFlightInvocationMetadata, InboxedInvocation,
+    JournalMetadata, JournalRetentionPolicy, PreFlightInvocationArgument, PreFlightInvocationInput,
     PreFlightInvocationJournal, PreFlightInvocationMetadata, ReadInvocationStatusTable,
     WriteInvocationStatusTable,
 };
@@ -53,6 +58,7 @@ use restate_storage_api::outbox_table::{OutboxMessage, WriteOutboxTable};
 use restate_storage_api::promise_table::{
     Promise, PromiseState, ReadPromiseTable, WritePromiseTable,
 };
+use restate_storage_api::service_edges_table::{ReadServiceEdgesTable, WriteServiceEdgesTable};
 use restate_storage_api::service_status_table::{
     ReadVirtualObjectStatusTable, VirtualObjectStatus, WriteVirtualObjectStatusTable,
 };
@@ -68,7 +74,8 @@ use restate_tracing_instrumentation as instrumentation;
 use restate_types::clock::UniqueTimestamp;
 use restate_types::errors::{
     ALREADY_COMPLETED_INVOCATION_ERROR, CANCELED_INVOCATION_ERROR, GenericError, InvocationError,
-    KILLED_INVOCATION_ERROR, NOT_FOUND_INVOCATION_ERROR, NOT_READY_INVOCATION_ERROR,
+    InvocationErrorCode, KILLED_INVOCATION_ERROR, NOT_FOUND_INVOCATION_ERROR,
+    NOT_READY_INVOCATION_ERROR, SERVICE_COMPLETED_INVOCATION_ERROR,
     WORKFLOW_ALREADY_INVOKED_INVOCATION_ERROR,
 };
 use restate_types::identifiers::WithPartitionKey;
@@ -81,12 +88,15 @@ use restate_types::invocation::client::{
     PurgeInvocationResponse, ResumeInvocationResponse,
 };
 use restate_types::invocation::{
-    AttachInvocationRequest, IngressInvocationResponseSink, InvocationInput,
-    InvocationMutationResponseSink, InvocationQuery, InvocationResponse, InvocationTarget,
-    InvocationTargetType, InvocationTermination, JournalCompletionTarget, NotifySignalRequest,
-    PurgeInvocationRequest, ResponseResult, RestartAsNewInvocationRequest, ResumeInvocationRequest,
-    ServiceInvocation, ServiceInvocationResponseSink, ServiceInvocationSpanContext, Source,
-    SubmitNotificationSink, TerminationFlavor, VirtualObjectHandlerType, WorkflowHandlerType,
+    AttachInvocationRequest, AttachServiceRequest, EdgeLabel, EdgeState, EntityId,
+    IngressInvocationResponseSink, InvocationInput, InvocationMutationResponseSink,
+    InvocationQuery, InvocationResponse, InvocationTarget, InvocationTargetType,
+    InvocationTermination, JournalCompletionTarget, LinkCompletionNotification, LinkRequest,
+    LinkResponse, LinkStatus, NotifySignalRequest, PurgeInvocationRequest, ResponseResult,
+    RestartAsNewInvocationRequest, ResumeInvocationRequest, ServiceCompletionTarget,
+    ServiceInvocation, ServiceInvocationResponseSink, ServiceInvocationSpanContext, ServiceType,
+    Source, SubmitNotificationSink, TerminationFlavor, UnlinkRequest, UnlinkResponse,
+    VirtualObjectHandlerType, WorkflowHandlerType,
 };
 use restate_types::journal::Completion;
 use restate_types::journal::CompletionResult;
@@ -424,6 +434,30 @@ impl StateMachine {
     }
 }
 
+/// Remove all sinks that were registered by `parent` from a child's response_sinks HashSet.
+/// Called during unlink cleanup for both VO-child and WI-child branches.
+fn retain_non_linked_from_sinks(
+    response_sinks: &mut HashSet<ServiceInvocationResponseSink>,
+    linked_from: &EntityId,
+    linked_from_service_opt: Option<&ServiceId>,
+) {
+    response_sinks.retain(|sink| match sink {
+        ServiceInvocationResponseSink::ServiceCompletion(target) => {
+            linked_from_service_opt != Some(&target.service_id)
+        }
+        ServiceInvocationResponseSink::ServiceLinkNotification { linked_from: sid } => {
+            linked_from_service_opt != Some(sid)
+        }
+        ServiceInvocationResponseSink::InvocationLinkNotification { linked_from: iid } => {
+            match linked_from {
+                EntityId::WorkflowInvocation(pid) => iid != pid,
+                _ => true,
+            }
+        }
+        _ => true,
+    });
+}
+
 impl<S> StateMachineApplyContext<'_, S> {
     async fn get_invocation_status(
         &mut self,
@@ -560,6 +594,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             + ReadVirtualObjectStatusTable
             + WriteVirtualObjectStatusTable
             + ReadInboxTable
+            + LinkedServicesStorage
             + WriteInboxTable
             + ReadStateTable
             + WriteStateTable
@@ -677,6 +712,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                         status,
                         caller_completion_id: target.caller_completion_id,
                         result,
+                        linked_to: None,
                     }
                     .apply(self)
                     .await?;
@@ -953,6 +989,16 @@ impl<S> StateMachineApplyContext<'_, S> {
                 }
                 Ok(())
             }
+            Command::LinkRequest(link_request) => self.on_link_request(link_request).await,
+            Command::LinkResponse(link_response) => self.on_link_response(link_response).await,
+            Command::UnlinkRequest(unlink_request) => self.on_unlink_request(unlink_request).await,
+            Command::UnlinkResponse(unlink_response) => {
+                self.on_unlink_response(unlink_response).await
+            }
+            Command::LinkCompletionNotification(notification) => {
+                self.on_link_completion_notification(notification).await
+            }
+            Command::AttachServiceRequest(req) => self.on_attach_service(req).await,
         }
     }
 
@@ -974,7 +1020,9 @@ impl<S> StateMachineApplyContext<'_, S> {
             + ReadVQueueTable
             + WriteJournalTable
             + WriteLockTable
-            + journal_table_v2::WriteJournalTable,
+            + journal_table_v2::WriteJournalTable
+            + WriteServiceEdgesTable
+            + WriteInvocationEdgesTable,
     {
         let invocation_id = service_invocation.invocation_id;
         debug_assert!(
@@ -998,11 +1046,42 @@ impl<S> StateMachineApplyContext<'_, S> {
         // 3. Check if we need to inbox it (only for exclusive handlers of virtual objects services)
         // 4. Execute it
 
+        // Capture link_from metadata BEFORE calling handle_duplicated_requests, because if the
+        // invocation is deduplicated the Box is consumed. We need this to handle the case where
+        // a StartLinkedCommand targets an idempotent child that was already created — dedup must
+        // not silently swallow the link establishment; we still need to register notification
+        // sinks and send LinkResponse back to the parent (see: dedup-before-link_from bug in review).
+        let link_from_metadata = if let (Some(link_from), Some(caller_completion_id)) = (
+            service_invocation.link_from.clone(),
+            service_invocation.link_caller_completion_id,
+        ) {
+            if let Source::Service(caller_invocation_id, _) = &service_invocation.source {
+                Some((link_from, *caller_invocation_id, caller_completion_id))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // 1. Try deduplicate it first
         let Some(mut service_invocation) =
             self.handle_duplicated_requests(service_invocation).await?
         else {
-            // Invocation was deduplicated, nothing else to do here
+            // Invocation was deduplicated — but if it carried link_from, we must still establish
+            // the link against the pre-existing invocation. Without this, the parent's
+            // LinkedTo(Active) edge stays Active forever and the parent workflow hangs silently.
+            if let Some((link_from, caller_invocation_id, caller_completion_id)) =
+                link_from_metadata
+            {
+                self.on_link_from_deduplicated_invocation(
+                    invocation_id,
+                    link_from,
+                    caller_invocation_id,
+                    caller_completion_id,
+                )
+                .await?;
+            }
             return Ok(());
         };
 
@@ -1012,6 +1091,14 @@ impl<S> StateMachineApplyContext<'_, S> {
                 || service_invocation.invocation_target.scope().is_some(),
             "limit_key set without scope — this should have been rejected at the ingress"
         );
+
+        // Detect link_from — child-side link processing for StartLinkedCommand piggyback path.
+        // Must happen before from_service_invocation so we can register notification sinks.
+        if service_invocation.link_from.is_some() {
+            return self
+                .on_link_from_invocation(invocation_id, service_invocation)
+                .await;
+        }
 
         let random_seed = self.is_unique_random_seeds_enabled().then(|| {
             invocation_id.to_random_seed_with_wal_record_time(self.record_created_at.as_u64())
@@ -1043,6 +1130,259 @@ impl<S> StateMachineApplyContext<'_, S> {
         .await
     }
 
+    /// Handle a `Command::Invoke` with `link_from.is_some()` — StartLinkedCommand piggyback path.
+    ///
+    /// Validates the target, creates the invocation (with `response_sink` flowing into
+    /// `response_sinks` naturally), inserts a link notification sink and increments `linked_from_count`,
+    /// then sends a `LinkResponse` back to the parent. If the target is already completed,
+    /// rejects without creating the invocation.
+    async fn on_link_from_invocation(
+        &mut self,
+        invocation_id: InvocationId,
+        mut service_invocation: Box<ServiceInvocation>,
+    ) -> Result<(), Error>
+    where
+        S: IdempotencyTable
+            + WriteOutboxTable
+            + WriteFsmTable
+            + ReadInvocationStatusTable
+            + WriteInvocationStatusTable
+            + ReadVirtualObjectStatusTable
+            + WriteVirtualObjectStatusTable
+            + WriteTimerTable
+            + WriteInboxTable
+            + WriteVQueueTable
+            + ReadVQueueTable
+            + WriteJournalTable
+            + journal_table_v2::WriteJournalTable
+            + WriteServiceEdgesTable
+            + WriteInvocationEdgesTable,
+    {
+        let link_from = service_invocation
+            .link_from
+            .take()
+            .expect("link_from must be Some — checked before calling this function");
+
+        // Extract caller_invocation_id from source — must be Source::Service for StartLinked
+        let caller_invocation_id = if let Source::Service(caller_id, _) = &service_invocation.source
+        {
+            *caller_id
+        } else {
+            warn!(
+                "Received link_from invocation {invocation_id} with unexpected source {:?} — ignoring",
+                service_invocation.source
+            );
+            return Ok(());
+        };
+
+        // Compute the child EntityId from the invocation target
+        let target_service_id = match service_invocation.invocation_target.as_keyed_service_id() {
+            Some(sid) => sid,
+            None => {
+                // Non-keyed target — unusual for StartLinked but handle defensively
+                warn!(
+                    "Received link_from invocation {invocation_id} targeting a non-keyed service — ignoring"
+                );
+                return Ok(());
+            }
+        };
+        let link_to = if matches!(
+            service_invocation.invocation_target.invocation_target_ty(),
+            InvocationTargetType::Workflow(_)
+        ) {
+            EntityId::WorkflowInvocation(invocation_id)
+        } else {
+            EntityId::Object(target_service_id.clone())
+        };
+
+        // Check if target is already completed
+        let rejection = {
+            let status = self
+                .storage
+                .get_virtual_object_status(&target_service_id)
+                .await
+                .map_err(Error::Storage)?;
+            matches!(status, VirtualObjectStatus::Completed { .. })
+        };
+
+        // Extract link_caller_completion_id before consuming service_invocation
+        let link_caller_completion_id = service_invocation.link_caller_completion_id;
+
+        if rejection {
+            warn!("link_from invocation {invocation_id} rejected: target already completed");
+            // Send LinkResponse(Err) if the parent is waiting for a completion id
+            if let Some(completion_id) = link_caller_completion_id {
+                self.handle_outgoing_message(OutboxMessage::LinkResponse(LinkResponse {
+                    linked_from: link_from,
+                    linked_to: link_to,
+                    caller_invocation_id,
+                    completion_id,
+                    result: Err(InvocationError::new(
+                        409u16,
+                        "linked target is already completed",
+                    )),
+                }))?;
+            }
+            return Ok(());
+        }
+
+        // The response_sink (ServiceCompletion if set) will flow naturally into response_sinks
+        // via from_service_invocation — no need to clear it.
+        let submit_notification_sink = service_invocation.submit_notification_sink.take();
+        let mut pre_flight_invocation_metadata =
+            PreFlightInvocationMetadata::from_service_invocation(
+                self.record_created_at,
+                *service_invocation,
+            );
+
+        // Add a link notification sink so that when the child WI completes, it emits a
+        // LinkCompletionNotification to the parent (replacing the old LinkedFrom edge scan).
+        let notification_sink = match &link_from {
+            EntityId::Object(sid) => Some(ServiceInvocationResponseSink::ServiceLinkNotification {
+                linked_from: sid.clone(),
+            }),
+            EntityId::WorkflowInvocation(parent_inv_id) => {
+                Some(ServiceInvocationResponseSink::InvocationLinkNotification {
+                    linked_from: *parent_inv_id,
+                })
+            }
+        };
+        if let Some(sink) = notification_sink {
+            pre_flight_invocation_metadata.response_sinks.insert(sink);
+        }
+
+        self.on_pre_flight_invocation(
+            invocation_id,
+            pre_flight_invocation_metadata,
+            submit_notification_sink,
+        )
+        .await?;
+
+        // Increment linked_from_count on the child — tracks how many parents reference it.
+        // For WI children, the count lives on InvocationStatus; for VO children, on VirtualObjectStatus.
+        match &link_to {
+            EntityId::WorkflowInvocation(_) => {
+                let mut status = self.get_invocation_status(&invocation_id).await?;
+                if let Some(count) = status.linked_from_count_mut() {
+                    *count += 1;
+                    self.storage
+                        .put_invocation_status(&invocation_id, &status)
+                        .map_err(Error::Storage)?;
+                }
+            }
+            EntityId::Object(link_to) => {
+                let mut vos = self.storage.get_virtual_object_status(link_to).await?;
+                *vos.linked_from_count_mut() += 1;
+                self.storage
+                    .put_virtual_object_status(link_to, &vos)
+                    .map_err(Error::Storage)?;
+            }
+        }
+
+        // Send LinkResponse(Ok) back to the parent so it can complete the link journal entry.
+        if let Some(completion_id) = link_caller_completion_id {
+            self.handle_outgoing_message(OutboxMessage::LinkResponse(LinkResponse {
+                linked_from: link_from,
+                linked_to: link_to,
+                caller_invocation_id,
+                completion_id,
+                result: Ok(()),
+            }))?;
+        }
+
+        Ok(())
+    }
+
+    /// Handle link establishment for a deduplicated `StartLinkedCommand` invocation.
+    ///
+    /// When `handle_duplicated_requests` returns `None` (dedup occurred) AND the invocation
+    /// carried `link_from`, the parent is still waiting for a `LinkResponse`. We must:
+    ///
+    /// 1. Insert a link notification sink and increment `linked_from_count` on the pre-existing invocation.
+    /// 2. Send `LinkResponse(Ok)` back to the parent.
+    ///
+    /// NOTE: The `response_sink` (ServiceCompletion if any) was already handled by
+    /// `handle_duplicated_requests` — it either appended the sink to the existing invocation's
+    /// `response_sinks` or fired it immediately (if the invocation was already Completed).
+    /// We still need to add the link notification sink here.
+    async fn on_link_from_deduplicated_invocation(
+        &mut self,
+        invocation_id: InvocationId,
+        link_from: EntityId,
+        caller_invocation_id: InvocationId,
+        caller_completion_id: CompletionId,
+    ) -> Result<(), Error>
+    where
+        S: WriteOutboxTable
+            + WriteFsmTable
+            + ReadInvocationStatusTable
+            + WriteInvocationStatusTable
+            + WriteInvocationEdgesTable,
+    {
+        let link_to = EntityId::WorkflowInvocation(invocation_id);
+
+        let status = self.get_invocation_status(&invocation_id).await?;
+
+        // If the child WI is already Completed or Free, the notification sink cannot be
+        // installed (response_sinks/linked_from_count are not available on terminal variants).
+        // Send LinkCompletionNotification immediately so the parent's LinkedTo(Active) edge
+        // transitions to Completed and the parent doesn't hang in Completing.
+        if matches!(
+            status,
+            InvocationStatus::Completed(_) | InvocationStatus::Free
+        ) {
+            self.handle_outgoing_message(OutboxMessage::LinkCompletionNotification(
+                LinkCompletionNotification {
+                    linked_from: link_from.clone(),
+                    linked_to: link_to.clone(),
+                },
+            ))?;
+            self.handle_outgoing_message(OutboxMessage::LinkResponse(LinkResponse {
+                linked_from: link_from,
+                linked_to: link_to,
+                caller_invocation_id,
+                completion_id: caller_completion_id,
+                result: Ok(()),
+            }))?;
+            return Ok(());
+        }
+
+        // Add the link notification sink to the existing child invocation's response_sinks,
+        // so that when it completes, a LinkCompletionNotification is dispatched to the parent.
+        let notification_sink = match &link_from {
+            EntityId::Object(sid) => ServiceInvocationResponseSink::ServiceLinkNotification {
+                linked_from: sid.clone(),
+            },
+            EntityId::WorkflowInvocation(parent_inv_id) => {
+                ServiceInvocationResponseSink::InvocationLinkNotification {
+                    linked_from: *parent_inv_id,
+                }
+            }
+        };
+        let mut status = status;
+        if let Some(sinks) = status.get_response_sinks_mut() {
+            sinks.insert(notification_sink);
+        }
+        // Increment linked_from_count — tracks that one more parent references this child WI.
+        if let Some(count) = status.linked_from_count_mut() {
+            *count += 1;
+        }
+        self.storage
+            .put_invocation_status(&invocation_id, &status)
+            .map_err(Error::Storage)?;
+
+        // Send LinkResponse(Ok) back to parent so it can complete its link journal entry.
+        self.handle_outgoing_message(OutboxMessage::LinkResponse(LinkResponse {
+            linked_from: link_from,
+            linked_to: link_to,
+            caller_invocation_id,
+            completion_id: caller_completion_id,
+            result: Ok(()),
+        }))?;
+
+        Ok(())
+    }
+
     async fn on_pre_flight_invocation(
         &mut self,
         invocation_id: &InvocationId,
@@ -1054,9 +1394,9 @@ impl<S> StateMachineApplyContext<'_, S> {
             + WriteFsmTable
             + ReadVirtualObjectStatusTable
             + WriteVirtualObjectStatusTable
+            + WriteOutboxTable
             + WriteTimerTable
             + WriteInboxTable
-            + WriteFsmTable
             + WriteVQueueTable
             + ReadVQueueTable
             + WriteJournalTable
@@ -1282,7 +1622,9 @@ impl<S> StateMachineApplyContext<'_, S> {
         S: ReadInvocationStatusTable
             + WriteInvocationStatusTable
             + WriteOutboxTable
-            + WriteFsmTable,
+            + WriteFsmTable
+            + ReadOnlyIdempotencyTable
+            + ReadVirtualObjectStatusTable,
     {
         let invocation_id = service_invocation.invocation_id;
         let is_workflow_run = service_invocation.invocation_target.invocation_target_ty()
@@ -1294,7 +1636,42 @@ impl<S> StateMachineApplyContext<'_, S> {
             has_idempotency_key = false;
         }
 
-        let previous_invocation_status = self.get_invocation_status(&invocation_id).await?;
+        let previous_invocation_status = async {
+            let mut invocation_status = self.get_invocation_status(&invocation_id).await?;
+            if invocation_status != InvocationStatus::Free {
+                // Deduplicated invocation with the new deterministic invocation id
+              Ok::<_, Error>(invocation_status)
+            } else {
+                // We might still need to deduplicate based on the idempotency table for old invocation ids
+                // TODO get rid of this code when we remove the idempotency table
+                if has_idempotency_key {
+                    let idempotency_id = service_invocation
+                        .compute_idempotency_id()
+                        .expect("Idempotency key must be present");
+
+                    if let Some(idempotency_metadata) = self.storage.get_idempotency_metadata(&idempotency_id).await? {
+                        invocation_status = self.get_invocation_status(&idempotency_metadata.invocation_id).await?;
+                    }
+                }
+                // Or on lock status for workflow runs with old invocation ids
+                // TODO get rid of this code when we remove the usage of the virtual object table for workflows
+                if is_workflow_run {
+                    let keyed_service_id = service_invocation
+                        .invocation_target
+                        .as_keyed_service_id()
+                        .expect("When the handler type is Workflow, the invocation target must have a key");
+
+                    if let VirtualObjectStatus::Locked { invocation_id: locked_invocation_id, .. } = self
+                        .storage
+                        .get_virtual_object_status(&keyed_service_id)
+                        .await? {
+                        invocation_status = self.get_invocation_status(&locked_invocation_id).await?;
+                    }
+                }
+                Ok(invocation_status)
+            }
+
+        }.await?;
 
         if previous_invocation_status == InvocationStatus::Free {
             // --- New invocation
@@ -1332,6 +1709,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                 Some(invocation_id),
                 None,
                 Some(&service_invocation.invocation_target),
+                None,
             )?;
         }
 
@@ -1348,6 +1726,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             is @ InvocationStatus::Invoked { .. }
             | is @ InvocationStatus::Suspended { .. }
             | is @ InvocationStatus::Paused { .. }
+            | is @ InvocationStatus::Completing { .. }
             | is @ InvocationStatus::Inboxed { .. }
             | is @ InvocationStatus::Scheduled { .. } => {
                 if let Some(ref response_sink) = service_invocation.response_sink
@@ -1367,6 +1746,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                     Some(invocation_id),
                     completion_expiry_time,
                     Some(&completed.invocation_target),
+                    None,
                 )?;
             }
             InvocationStatus::Free => {
@@ -1416,14 +1796,15 @@ impl<S> StateMachineApplyContext<'_, S> {
     /// Returns the invocation in case the invocation was not inboxed
     async fn handle_service_invocation_exclusive_handler(
         &mut self,
-        invocation_id: &InvocationId,
-        metadata: PreFlightInvocationMetadata,
+        invocation_id: InvocationId,
+        mut metadata: PreFlightInvocationMetadata,
     ) -> Result<Option<PreFlightInvocationMetadata>, Error>
     where
         S: ReadVirtualObjectStatusTable
             + WriteVirtualObjectStatusTable
             + WriteInvocationStatusTable
             + WriteInboxTable
+            + WriteOutboxTable
             + WriteFsmTable,
     {
         if metadata.invocation_target.invocation_target_ty()
@@ -1438,45 +1819,95 @@ impl<S> StateMachineApplyContext<'_, S> {
                 .get_virtual_object_status(&keyed_service_id)
                 .await?;
 
-            if let VirtualObjectStatus::Locked(_) = service_status {
-                // If locked, enqueue in inbox and be done with it
-                let inbox_seq_number = self
-                    .enqueue_into_inbox(InboxEntry::Invocation(keyed_service_id, *invocation_id))
-                    .await?;
+            match service_status {
+                VirtualObjectStatus::Completed { .. } => {
+                    // Object is completed — reject the invocation
+                    debug_if_leader!(
+                        self.is_leader,
+                        rpc.service = %keyed_service_id,
+                        "Rejecting invocation to completed service object"
+                    );
+                    self.send_response_to_sinks(
+                        metadata.response_sinks.drain(),
+                        ResponseResult::Failure(SERVICE_COMPLETED_INVOCATION_ERROR),
+                        Some(invocation_id),
+                        None,
+                        Some(&metadata.invocation_target),
+                        None,
+                    )?;
+                    return Ok(None);
+                }
+                VirtualObjectStatus::Locked { .. } => {
+                    // If locked, enqueue in inbox and be done with it
+                    let inbox_seq_number = self
+                        .enqueue_into_inbox(InboxEntry::Invocation(keyed_service_id, invocation_id))
+                        .await?;
 
-                debug_if_leader!(
-                    self.is_leader,
-                    restate.outbox.seq = inbox_seq_number,
-                    "Store inboxed invocation"
-                );
-                self.storage
-                    .put_invocation_status(
-                        invocation_id,
-                        &InvocationStatus::Inboxed(
-                            InboxedInvocation::from_pre_flight_invocation_metadata(
-                                metadata,
-                                inbox_seq_number,
-                                self.record_created_at,
+                    debug_if_leader!(
+                        self.is_leader,
+                        restate.outbox.seq = inbox_seq_number,
+                        "Store inboxed invocation"
+                    );
+                    self.storage
+                        .put_invocation_status(
+                            &invocation_id,
+                            &InvocationStatus::Inboxed(
+                                InboxedInvocation::from_pre_flight_invocation_metadata(
+                                    metadata,
+                                    inbox_seq_number,
+                                    self.record_created_at,
+                                ),
                             ),
-                        ),
-                    )
-                    .map_err(Error::Storage)?;
+                        )
+                        .map_err(Error::Storage)?;
 
-                return Ok(None);
-            } else {
-                // If unlocked, lock it
+                    return Ok(None);
+                }
+                VirtualObjectStatus::Unlocked {
+                    response_sinks,
+                    linked_from_count,
+                } => {
+                    // If unlocked, lock it (preserving existing response_sinks)
+                    debug_if_leader!(
+                        self.is_leader,
+                        restate.service.id = %keyed_service_id,
+                        "Locking service"
+                    );
+
+                    self.storage
+                        .put_virtual_object_status(
+                            &keyed_service_id,
+                            &VirtualObjectStatus::Locked {
+                                invocation_id,
+                                response_sinks,
+                                linked_from_count,
+                            },
+                        )
+                        .map_err(Error::Storage)?;
+                }
+            }
+        } else if let Some(keyed_service_id) = metadata.invocation_target.as_keyed_service_id() {
+            // For shared and other keyed handlers, still reject if the object has completed
+            let service_status = self
+                .storage
+                .get_virtual_object_status(&keyed_service_id)
+                .await?;
+
+            if matches!(service_status, VirtualObjectStatus::Completed { .. }) {
                 debug_if_leader!(
                     self.is_leader,
-                    restate.service.id = %keyed_service_id,
-                    "Locking service"
+                    rpc.service = %keyed_service_id,
+                    "Rejecting invocation to completed service object"
                 );
-
-                self.storage
-                    .put_virtual_object_status(
-                        &keyed_service_id,
-                        &VirtualObjectStatus::Locked(*invocation_id),
-                    )
-                    .map_err(Error::Storage)?;
+                self.send_response_to_sinks(
+                    metadata.response_sinks.drain(),
+                    ResponseResult::Failure(SERVICE_COMPLETED_INVOCATION_ERROR),
+                    Some(invocation_id),
+                    None,
+                    Some(&metadata.invocation_target),
+                    None,
+                )?;
+                return Ok(None);
             }
         }
         Ok(Some(metadata))
@@ -1716,6 +2147,637 @@ impl<S> StateMachineApplyContext<'_, S> {
         Ok(seq_number)
     }
 
+    async fn on_link_request(&mut self, request: LinkRequest) -> Result<(), Error>
+    where
+        S: WriteServiceEdgesTable
+            + ReadVirtualObjectStatusTable
+            + WriteVirtualObjectStatusTable
+            + WriteOutboxTable
+            + WriteFsmTable,
+    {
+        let link_to = request.link_to.clone();
+        let link_from = request.link_from.clone();
+        let handler_sink = request.handler_sink;
+
+        match &link_to {
+            EntityId::Object(link_to_service) => {
+                let mut child_status = self
+                    .storage
+                    .get_virtual_object_status(link_to_service)
+                    .await?;
+
+                if let VirtualObjectStatus::Completed { result, .. } = &child_status {
+                    // Child is already completed — fire handler sink immediately if present,
+                    // emit a graph notification so the parent's LinkedTo edge transitions to Completed,
+                    // then respond with success. Retention for the spawned handler is carried
+                    // on the sink target itself (inherited from the linker at link time).
+                    if let Some(sink) = handler_sink {
+                        self.fire_service_completion(sink, result.clone())?;
+                    }
+                    // Increment linked_from_count — this parent now references the completed child.
+                    // Required so on_unlink_request GC cascade doesn't fire prematurely.
+                    *child_status.linked_from_count_mut() += 1;
+                    self.storage
+                        .put_virtual_object_status(link_to_service, &child_status)
+                        .map_err(Error::Storage)?;
+                    // Graph notification: transition parent's LinkedTo(Active) → Completed
+                    self.handle_outgoing_message(OutboxMessage::LinkCompletionNotification(
+                        LinkCompletionNotification {
+                            linked_from: link_from.clone(),
+                            linked_to: link_to.clone(),
+                        },
+                    ))?;
+                    self.handle_outgoing_message(OutboxMessage::LinkResponse(LinkResponse {
+                        linked_from: link_from,
+                        linked_to: link_to,
+                        caller_invocation_id: request.caller_invocation_id,
+                        completion_id: request.caller_completion_id,
+                        result: Ok(()),
+                    }))?;
+                    return Ok(());
+                }
+
+                // Add sinks to child VO's response_sinks:
+                // - ServiceCompletion (if an onCompleted handler was registered by the parent)
+                // - ServiceLinkNotification or InvocationLinkNotification (always, for graph notification)
+                // Reuses the status from the read above — put_service_edge does not modify it.
+                if let Some(sinks) = child_status.response_sinks_mut() {
+                    if let Some(sink) = handler_sink {
+                        sinks.insert(ServiceInvocationResponseSink::ServiceCompletion(sink));
+                    }
+                    // Link notification sink: emits LinkCompletionNotification to parent when child completes.
+                    let notification_sink = match &link_from {
+                        EntityId::Object(sid) => {
+                            ServiceInvocationResponseSink::ServiceLinkNotification {
+                                linked_from: sid.clone(),
+                            }
+                        }
+                        EntityId::WorkflowInvocation(parent_inv_id) => {
+                            ServiceInvocationResponseSink::InvocationLinkNotification {
+                                linked_from: *parent_inv_id,
+                            }
+                        }
+                    };
+                    sinks.insert(notification_sink);
+                }
+                // Increment linked_from_count — tracks how many parents reference this child VO.
+                // Placed outside the response_sinks_mut() guard because linked_from_count_mut()
+                // is available on all variants including Completed.
+                *child_status.linked_from_count_mut() += 1;
+                self.storage
+                    .put_virtual_object_status(link_to_service, &child_status)
+                    .map_err(Error::Storage)?;
+            }
+            // LinkRequest to a WorkflowInvocation child is not supported — StartLinkedCommand
+            // is the correct path for WI targets (piggyback via ServiceInvocation.link_from).
+            EntityId::WorkflowInvocation(_) => {
+                warn!(
+                    "Received LinkRequest targeting WorkflowInvocation child {:?} — unsupported; \
+                    use StartLinkedCommand for WI targets. Responding with error.",
+                    link_to
+                );
+                self.handle_outgoing_message(OutboxMessage::LinkResponse(LinkResponse {
+                    linked_from: link_from,
+                    linked_to: link_to,
+                    caller_invocation_id: request.caller_invocation_id,
+                    completion_id: request.caller_completion_id,
+                    result: Err(restate_types::errors::InvocationError::new(
+                        400u16,
+                        "LinkRequest to WorkflowInvocation child is not supported — use StartLinkedCommand",
+                    )),
+                }))?;
+                return Ok(());
+            }
+        }
+
+        // Respond with success (VO child, not already completed)
+        self.handle_outgoing_message(OutboxMessage::LinkResponse(LinkResponse {
+            linked_from: link_from,
+            linked_to: link_to,
+            caller_invocation_id: request.caller_invocation_id,
+            completion_id: request.caller_completion_id,
+            result: Ok(()),
+        }))?;
+
+        Ok(())
+    }
+
+    async fn on_link_response(&mut self, response: LinkResponse) -> Result<(), Error>
+    where
+        S: WriteOutboxTable
+            + WriteFsmTable
+            + journal_table::ReadJournalTable
+            + journal_table::WriteJournalTable
+            + journal_table_v2::ReadJournalTable
+            + journal_table_v2::WriteJournalTable
+            + ReadInvocationStatusTable
+            + WriteInvocationStatusTable
+            + WriteTimerTable
+            + ReadPromiseTable
+            + WritePromiseTable
+            + ReadStateTable
+            + WriteStateTable
+            + WriteVQueueTable
+            + ReadVQueueTable
+            + LinkedServicesStorage
+            + ReadVirtualObjectStatusTable
+            + WriteVirtualObjectStatusTable,
+    {
+        let invocation_id = response.caller_invocation_id;
+        let caller_completion_id = response.completion_id;
+        let linked_to = response.linked_to;
+
+        let (result, linked_to, status) = match response.result {
+            Ok(()) => {
+                let status = self.get_invocation_status(&invocation_id).await?;
+                (
+                    ResponseResult::Success(bytes::Bytes::new()),
+                    Some(linked_to),
+                    status,
+                )
+            }
+            Err(err) => {
+                // On error: delete the stale LinkedTo(Active) edge from whichever table
+                // the initiator uses. Object initiators use ServiceEdges; WI use InvocationEdges.
+                match &response.linked_from {
+                    EntityId::Object(linked_from) => {
+                        self.storage
+                            .delete_service_edge(linked_from, EdgeLabel::LinkedTo, &linked_to)
+                            .map_err(Error::Storage)?;
+                    }
+                    EntityId::WorkflowInvocation(linked_from) => {
+                        self.storage
+                            .delete_invocation_edge(linked_from, EdgeLabel::LinkedTo, &linked_to)
+                            .map_err(Error::Storage)?;
+                    }
+                }
+                // Decrement linked_to_count — the optimistically-created edge was rejected.
+                let mut status = self.get_invocation_status(&invocation_id).await?;
+                if let Some(count) = status.linked_to_count_mut() {
+                    *count = count.saturating_sub(1);
+                    self.storage
+                        .put_invocation_status(&invocation_id, &status)
+                        .map_err(Error::Storage)?;
+                }
+                (ResponseResult::Failure(err), None, status)
+            }
+        };
+
+        if should_use_journal_table_v2(&status) {
+            lifecycle::OnNotifyInvocationResponse {
+                invocation_id,
+                status,
+                caller_completion_id,
+                result,
+                linked_to,
+            }
+            .apply(self)
+            .await?;
+        } else {
+            warn!(
+                "Received LinkResponse for invocation {invocation_id} using old protocol — ignoring"
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn on_unlink_request(&mut self, request: UnlinkRequest) -> Result<(), Error>
+    where
+        S: WriteServiceEdgesTable
+            + ReadServiceEdgesTable
+            + WriteInvocationEdgesTable
+            + ReadInvocationEdgesTable
+            + ReadVirtualObjectStatusTable
+            + WriteVirtualObjectStatusTable
+            + ReadInvocationStatusTable
+            + WriteInvocationStatusTable
+            + WriteStateTable
+            + ReadStateTable
+            + WritePromiseTable
+            + ReadPromiseTable
+            + WriteOutboxTable
+            + WriteFsmTable,
+    {
+        let linked_from = request.linked_from.clone();
+
+        // VO parents may have registered a ServiceCompletion sink — extract their service_id
+        // so we can filter the child's response_sinks during cleanup.
+        let linked_from_service_opt = match &linked_from {
+            EntityId::Object(sid) => Some(sid.clone()),
+            EntityId::WorkflowInvocation(_) => None, // WI parents don't register ServiceCompletion sinks
+        };
+
+        match &request.linked_to {
+            EntityId::Object(linked_to) => {
+                // Read child VO status once — used for sink cleanup, linked_from_count decrement, and GC.
+                let mut status = self.storage.get_virtual_object_status(linked_to).await?;
+
+                // Remove all sinks registered by this parent from the child VO's response_sinks,
+                // and decrement linked_from_count — both in one read/write cycle.
+                // response_sinks_mut returns None for Completed status — skip sink cleanup there.
+                if let Some(response_sinks) = status.response_sinks_mut() {
+                    retain_non_linked_from_sinks(
+                        response_sinks,
+                        &linked_from,
+                        linked_from_service_opt.as_ref(),
+                    );
+                }
+
+                // Decrement linked_from_count to track remaining parents.
+                let count = status.linked_from_count_mut();
+                *count = count.saturating_sub(1);
+                let no_remaining_parents = *count == 0;
+
+                // Persist updated status (unless GC will delete it below)
+                if !no_remaining_parents || !matches!(status, VirtualObjectStatus::Completed { .. })
+                {
+                    self.storage
+                        .put_virtual_object_status(linked_to, &status)
+                        .map_err(Error::Storage)?;
+                }
+
+                if no_remaining_parents {
+                    // No remaining parents — check if the child has completed (reuse status from above)
+                    if matches!(status, VirtualObjectStatus::Completed { .. }) {
+                        // GC cascade: delete all state, promises, status, enqueue unlinks for grandchildren
+                        self.storage
+                            .delete_all_user_state(linked_to)
+                            .map_err(Error::Storage)?;
+                        self.storage
+                            .delete_all_promises(linked_to)
+                            .map_err(Error::Storage)?;
+                        self.storage
+                            .delete_virtual_object_status(linked_to)
+                            .map_err(Error::Storage)?;
+
+                        // Propagate unlink to grandchildren (no response expected — GC cascade)
+                        let grandchildren = self.storage.get_service_linked_to(linked_to).await?;
+                        let linked_to_entity = request.linked_to.clone();
+                        for (grandchild_entity, _edge_state) in grandchildren {
+                            self.handle_outgoing_message(OutboxMessage::UnlinkRequest(
+                                UnlinkRequest {
+                                    linked_to: grandchild_entity,
+                                    linked_from: linked_to_entity.clone(),
+                                    caller_invocation_id: request.caller_invocation_id,
+                                    // GC cascade: no completion response expected
+                                    caller_completion_id: None,
+                                },
+                            ))?;
+                        }
+
+                        // Delete all edges for the child
+                        self.storage
+                            .delete_all_service_edges(linked_to)
+                            .map_err(Error::Storage)?;
+                    }
+                }
+            }
+            EntityId::WorkflowInvocation(linked_to) => {
+                // Remove all sinks registered by this parent from the child WI's response_sinks,
+                // and decrement linked_from_count — both in one read/write cycle.
+                let mut status = self.get_invocation_status(linked_to).await?;
+                let mut status_changed = false;
+                if let Some(response_sinks) = status.get_response_sinks_mut() {
+                    let before_len = response_sinks.len();
+                    retain_non_linked_from_sinks(
+                        response_sinks,
+                        &linked_from,
+                        linked_from_service_opt.as_ref(),
+                    );
+                    status_changed = response_sinks.len() != before_len;
+                }
+                if let Some(count) = status.linked_from_count_mut() {
+                    *count = count.saturating_sub(1);
+                    status_changed = true;
+                }
+                if status_changed {
+                    self.storage
+                        .put_invocation_status(linked_to, &status)
+                        .map_err(Error::Storage)?;
+                }
+                // WI self-cleans on completion, so no GC cascade needed here
+            }
+        }
+
+        // Send UnlinkResponse back to parent if this was an SDK-initiated unlink
+        if let Some(completion_id) = request.caller_completion_id {
+            self.handle_outgoing_message(OutboxMessage::UnlinkResponse(UnlinkResponse {
+                linked_from,
+                caller_invocation_id: request.caller_invocation_id,
+                completion_id,
+                result: Ok(()),
+            }))?;
+        }
+
+        Ok(())
+    }
+
+    async fn on_unlink_response(&mut self, response: UnlinkResponse) -> Result<(), Error>
+    where
+        S: ReadInvocationStatusTable
+            + WriteInvocationStatusTable
+            + journal_table_v2::ReadJournalTable
+            + journal_table_v2::WriteJournalTable
+            + journal_table::ReadJournalTable
+            + journal_table::WriteJournalTable
+            + WriteTimerTable
+            + ReadPromiseTable
+            + WritePromiseTable
+            + ReadStateTable
+            + WriteStateTable
+            + WriteOutboxTable
+            + WriteVQueueTable
+            + ReadVQueueTable
+            + ReadServiceEdgesTable
+            + WriteServiceEdgesTable
+            + ReadInvocationEdgesTable
+            + WriteInvocationEdgesTable
+            + ReadVirtualObjectStatusTable
+            + WriteVirtualObjectStatusTable
+            + WriteFsmTable,
+    {
+        let status = self
+            .get_invocation_status(&response.caller_invocation_id)
+            .await?;
+        // linked_to_count was already decremented by unlink_service_command at edge-delete time.
+
+        let result = match response.result {
+            Ok(()) => ResponseResult::Success(bytes::Bytes::new()),
+            Err(err) => ResponseResult::Failure(err),
+        };
+
+        lifecycle::OnNotifyInvocationResponse {
+            invocation_id: response.caller_invocation_id,
+            status,
+            caller_completion_id: response.completion_id,
+            result,
+            linked_to: None,
+        }
+        .apply(self)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Graph-only notification: transitions the parent's `LinkedTo(Active)` edge to `Completed`
+    /// and resumes a `Completing` WI parent if all its children have now finished.
+    ///
+    /// Completion callbacks (ServiceCompletion handlers, PartitionProcessor sinks) are fired
+    /// independently via the unified `response_sinks` pipeline on the child's side. This handler
+    /// only updates graph state.
+    async fn on_link_completion_notification(
+        &mut self,
+        notification: LinkCompletionNotification,
+    ) -> Result<(), Error>
+    where
+        S: LinkedServicesStorage
+            + WriteOutboxTable
+            + WriteFsmTable
+            + ReadInvocationStatusTable
+            + WriteInvocationStatusTable
+            + ReadVirtualObjectStatusTable
+            + WriteVirtualObjectStatusTable
+            + WriteTimerTable
+            + WriteInboxTable
+            + WriteVQueueTable
+            + ReadVQueueTable
+            + WriteJournalTable
+            + ReadJournalTable
+            + journal_table_v2::WriteJournalTable
+            + journal_table_v2::ReadJournalTable
+            + ReadStateTable
+            + WriteStateTable
+            + WritePromiseTable
+            + ReadPromiseTable
+            + WriteJournalEventsTable,
+    {
+        let linked_to = notification.linked_to.clone();
+
+        match &notification.linked_from {
+            EntityId::Object(linked_from) => {
+                // Read ServiceEdges(parent, LinkedTo, child) — if absent, stale notification
+                let edge = self
+                    .storage
+                    .get_service_edge(linked_from, EdgeLabel::LinkedTo, &linked_to)
+                    .await?;
+
+                if edge.is_none() {
+                    debug_if_leader!(
+                        self.is_leader,
+                        "Received stale LinkCompletionNotification for parent {:?}, child {:?} — no LinkedTo edge found",
+                        linked_from,
+                        linked_to
+                    );
+                    return Ok(());
+                }
+
+                // Transition edge to Completed
+                self.storage
+                    .put_service_edge(
+                        linked_from,
+                        &linked_to,
+                        &EdgeState::LinkedTo(LinkStatus::Completed),
+                    )
+                    .map_err(Error::Storage)?;
+                // linked_to_count is NOT decremented here — the edge still exists (Completed).
+                // It decrements when the edge is deleted (unlink or bulk cleanup).
+                // Completion callbacks already fired via response_sinks on the child's side.
+            }
+            EntityId::WorkflowInvocation(linked_from) => {
+                // Check for the LinkedTo edge — if absent, this is a stale notification
+                let edge = self
+                    .storage
+                    .get_invocation_edge(linked_from, EdgeLabel::LinkedTo, &linked_to)
+                    .await?;
+
+                if edge.is_none() {
+                    debug_if_leader!(
+                        self.is_leader,
+                        "Received stale LinkCompletionNotification for WI parent {:?}, child {:?} — no LinkedTo edge found",
+                        linked_from,
+                        linked_to
+                    );
+                    return Ok(());
+                }
+
+                // Transition LinkedTo(Active) → LinkedTo(Completed)
+                self.storage
+                    .put_invocation_edge(
+                        linked_from,
+                        &linked_to,
+                        &EdgeState::LinkedTo(LinkStatus::Completed),
+                    )
+                    .map_err(Error::Storage)?;
+
+                // linked_to_count is NOT decremented here — the edge still exists (Completed).
+                // It decrements when the edge is deleted (unlink or bulk cleanup).
+
+                // Check if the parent is Completing (run handler already returned)
+                // and all its children have now finished.
+                let linked_from_status = self.get_invocation_status(linked_from).await?;
+                if let InvocationStatus::Completing(completing_invocation) = linked_from_status {
+                    // Scan for any remaining active children
+                    let remaining = self.storage.get_invocation_linked_to(linked_from).await?;
+                    let any_active = remaining
+                        .iter()
+                        .any(|(_, es)| matches!(es, EdgeState::LinkedTo(LinkStatus::Active)));
+
+                    if !any_active {
+                        // All children completed — resume the completion path
+                        let linked_from_id = *linked_from;
+                        self.resume_completing_invocation(linked_from_id, completing_invocation)
+                            .await?;
+                    }
+                    // else: still waiting for more children
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Re-runs the final completion steps that `end_invocation` skipped when it stored
+    /// `InvocationStatus::Completing`. Called when all linked children have completed.
+    async fn resume_completing_invocation(
+        &mut self,
+        invocation_id: InvocationId,
+        mut completing: CompletingInvocation,
+    ) -> Result<(), Error>
+    where
+        S: WriteInboxTable
+            + ReadInvocationStatusTable
+            + WriteInvocationStatusTable
+            + ReadVirtualObjectStatusTable
+            + WriteVirtualObjectStatusTable
+            + WriteJournalTable
+            + ReadJournalTable
+            + WriteOutboxTable
+            + WriteFsmTable
+            + ReadStateTable
+            + WriteStateTable
+            + WritePromiseTable
+            + ReadPromiseTable
+            + journal_table_v2::WriteJournalTable
+            + journal_table_v2::ReadJournalTable
+            + ReadVQueueTable
+            + WriteVQueueTable
+            + WriteJournalEventsTable
+            + ReadInvocationEdgesTable
+            + WriteInvocationEdgesTable,
+    {
+        let invocation_target = completing.invocation_target.clone();
+        let journal_length = completing.journal_metadata.length;
+        let completion_retention = completing.completion_retention_duration;
+        let journal_retention = completing.journal_retention_duration;
+        let pinned_service_protocol_version = completing
+            .pinned_deployment
+            .as_ref()
+            .map(|pd| pd.service_protocol_version);
+        // Extract notification info before sending response (avoids cloning response_result).
+        let invocation_result_for_notify = match &completing.response_result {
+            ResponseResult::Success(_) => Ok(()),
+            ResponseResult::Failure(err) => Err((err.code(), err.message().to_owned())),
+        };
+
+        // Send response to callers. Retention for any ServiceCompletion sinks is
+        // carried on the sink target itself, inherited from the linker parent at link time.
+        // completing_entity is this WI itself — used for ServiceLinkNotification dispatch.
+        let response_sinks = std::mem::take(&mut completing.response_sinks);
+        self.send_response_to_sinks(
+            response_sinks,
+            completing.response_result.clone(),
+            Some(invocation_id),
+            None,
+            Some(&invocation_target),
+            Some(EntityId::WorkflowInvocation(invocation_id)),
+        )?;
+
+        // Clean up all InvocationEdges (LinkedTo edges) for this invocation as part of teardown.
+        // linked_to_count gate avoids the RocksDB seek for invocations with no children.
+        // Cascade UnlinkRequests so children's linked_from_count is decremented and GC can fire.
+        if completing.linked_to_count > 0 {
+            let linked_from = EntityId::WorkflowInvocation(invocation_id);
+            let children = self
+                .storage
+                .get_invocation_linked_to(&invocation_id)
+                .await?;
+            for (linked_to, _) in children {
+                self.handle_outgoing_message(OutboxMessage::UnlinkRequest(UnlinkRequest {
+                    linked_to,
+                    linked_from: linked_from.clone(),
+                    caller_invocation_id: invocation_id,
+                    caller_completion_id: None,
+                }))?;
+            }
+            self.storage
+                .delete_all_invocation_edges(&invocation_id)
+                .map_err(Error::Storage)?;
+        }
+
+        // Notify invocation result (tracing/metrics)
+        self.notify_invocation_result(
+            &invocation_id,
+            &invocation_target,
+            &completing.journal_metadata.span_context,
+            completing.timestamps.creation_time(),
+            invocation_result_for_notify,
+        );
+
+        // Store the completed status, if needed
+        if !completion_retention.is_zero() {
+            let completed_invocation = CompletedInvocation::from_completing_invocation(
+                completing,
+                if journal_retention.is_zero() {
+                    JournalRetentionPolicy::Drop
+                } else {
+                    JournalRetentionPolicy::Retain
+                },
+                self.record_created_at,
+            );
+            self.do_store_completed_invocation(invocation_id, completed_invocation)?;
+        } else {
+            self.do_free_invocation(invocation_id)?;
+        }
+
+        if journal_retention.is_zero() {
+            self.do_drop_journal(
+                invocation_id,
+                journal_length,
+                pinned_service_protocol_version,
+            )
+            .await?;
+        }
+
+        if Configuration::pinned().common.experimental_enable_vqueues {
+            if invocation_target.invocation_target_ty()
+                == InvocationTargetType::VirtualObject(VirtualObjectHandlerType::Exclusive)
+            {
+                let keyed_service_id = invocation_target.as_keyed_service_id().expect(
+                    "When the handler type is Exclusive, the invocation target must have a key",
+                );
+                self.do_unlock_service(keyed_service_id).await?;
+            }
+
+            let record_unique_ts =
+                UniqueTimestamp::from_unix_millis_unchecked(self.record_created_at);
+            VQueues::end_by_id(
+                self.storage,
+                self.vqueues_cache,
+                self.is_leader.then_some(self.action_collector),
+                record_unique_ts,
+                EntryKind::Invocation,
+                invocation_id.partition_key(),
+                &EntryId::from(invocation_id),
+            )
+            .await?;
+        } else {
+            self.consume_inbox(&invocation_target).await?;
+        }
+
+        Ok(())
+    }
+
     async fn handle_external_state_mutation(
         &mut self,
         mutation: ExternalStateMutation,
@@ -1740,11 +2802,19 @@ impl<S> StateMachineApplyContext<'_, S> {
                 .await?;
 
             match service_status {
-                VirtualObjectStatus::Locked(_) => {
+                VirtualObjectStatus::Locked { .. } => {
                     self.enqueue_into_inbox(InboxEntry::StateMutation(mutation))
                         .await?;
                 }
-                VirtualObjectStatus::Unlocked => Self::do_mutate_state(self, &mutation).await?,
+                VirtualObjectStatus::Completed { .. } => {
+                    trace!(
+                        "Rejecting external state mutation for completed object {:?}",
+                        mutation.service_id
+                    );
+                }
+                VirtualObjectStatus::Unlocked { .. } => {
+                    Self::do_mutate_state(self, &mutation).await?
+                }
             }
         }
 
@@ -1760,7 +2830,8 @@ impl<S> StateMachineApplyContext<'_, S> {
         }: InvocationTermination,
     ) -> Result<(), Error>
     where
-        S: WriteVirtualObjectStatusTable
+        S: ReadVirtualObjectStatusTable
+            + WriteVirtualObjectStatusTable
             + ReadInvocationStatusTable
             + WriteInvocationStatusTable
             + WriteInboxTable
@@ -1778,7 +2849,8 @@ impl<S> StateMachineApplyContext<'_, S> {
             + ReadVQueueTable
             + WriteVQueueTable
             + WriteLockTable
-            + WriteJournalEventsTable,
+            + WriteJournalEventsTable
+            + LinkedServicesStorage,
     {
         match termination_flavor {
             TerminationFlavor::Kill => self.on_kill_invocation(invocation_id, response_sink).await,
@@ -1795,7 +2867,8 @@ impl<S> StateMachineApplyContext<'_, S> {
         response_sink: Option<InvocationMutationResponseSink>,
     ) -> Result<(), Error>
     where
-        S: WriteVirtualObjectStatusTable
+        S: ReadVirtualObjectStatusTable
+            + WriteVirtualObjectStatusTable
             + ReadInvocationStatusTable
             + WriteInvocationStatusTable
             + WriteInboxTable
@@ -1806,13 +2879,16 @@ impl<S> StateMachineApplyContext<'_, S> {
             + WriteJournalTable
             + WriteOutboxTable
             + WriteTimerTable
-            + WriteFsmTable
+            + ReadPromiseTable
+            + WritePromiseTable
             + journal_table_v2::WriteJournalTable
             + journal_table_v2::ReadJournalTable
             + ReadVQueueTable
             + WriteVQueueTable
             + WriteLockTable
-            + WriteJournalEventsTable,
+            + WriteJournalEventsTable
+            + ReadInvocationEdgesTable
+            + WriteInvocationEdgesTable,
     {
         let status = self.get_invocation_status(&invocation_id).await?;
 
@@ -1839,6 +2915,18 @@ impl<S> StateMachineApplyContext<'_, S> {
                     scheduled,
                 )
                 .await?;
+                self.reply_to_kill(response_sink, KillInvocationResponse::Ok);
+            }
+            InvocationStatus::Completing(completing) => {
+                // Force-complete: the workflow handler already returned a result but is
+                // waiting for linked children. We proceed with the stored result, firing
+                // sinks, notifying parents, and cleaning up edges. Children keep running
+                // but the parent is no longer blocked.
+                debug!(
+                    "Force-completing invocation '{invocation_id}' that was waiting for linked children (kill)"
+                );
+                self.resume_completing_invocation(invocation_id, completing)
+                    .await?;
                 self.reply_to_kill(response_sink, KillInvocationResponse::Ok);
             }
             InvocationStatus::Completed(_) => {
@@ -1870,6 +2958,7 @@ impl<S> StateMachineApplyContext<'_, S> {
     ) -> Result<(), Error>
     where
         S: WriteVirtualObjectStatusTable
+            + ReadVirtualObjectStatusTable
             + ReadInvocationStatusTable
             + WriteInvocationStatusTable
             + WriteInboxTable
@@ -1887,7 +2976,8 @@ impl<S> StateMachineApplyContext<'_, S> {
             + ReadVQueueTable
             + WriteVQueueTable
             + WriteLockTable
-            + WriteTimerTable,
+            + WriteTimerTable
+            + LinkedServicesStorage,
     {
         let mut status = self.get_invocation_status(&invocation_id).await?;
 
@@ -2005,6 +3095,14 @@ impl<S> StateMachineApplyContext<'_, S> {
                 .await?;
                 self.reply_to_cancel(response_sink, CancelInvocationResponse::Done);
             }
+            InvocationStatus::Completing(completing) => {
+                debug!(
+                    "Force-completing invocation '{invocation_id}' that was waiting for linked children (cancel)"
+                );
+                self.resume_completing_invocation(invocation_id, completing)
+                    .await?;
+                self.reply_to_cancel(response_sink, CancelInvocationResponse::Done);
+            }
             InvocationStatus::Completed(_) => {
                 debug!(
                     "Received cancel command for completed invocation '{invocation_id}'. To cleanup the invocation after it's been completed, use the purge invocation command."
@@ -2069,6 +3167,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             Some(invocation_id),
             None,
             Some(&invocation_target),
+            None,
         )?;
 
         if let Some(vqueue_id) = vqueue_id {
@@ -2179,6 +3278,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             Some(invocation_id),
             None,
             Some(&invocation_target),
+            None,
         )?;
 
         if let Some(vqueue_id) = vqueue_id {
@@ -2258,10 +3358,10 @@ impl<S> StateMachineApplyContext<'_, S> {
     ) -> Result<(), Error>
     where
         S: WriteInboxTable
+            + ReadVirtualObjectStatusTable
             + WriteVirtualObjectStatusTable
             + ReadInvocationStatusTable
             + WriteInvocationStatusTable
-            + WriteVirtualObjectStatusTable
             + ReadStateTable
             + WriteStateTable
             + WriteJournalTable
@@ -2273,7 +3373,9 @@ impl<S> StateMachineApplyContext<'_, S> {
             + ReadVQueueTable
             + WriteVQueueTable
             + WriteLockTable
-            + WriteJournalEventsTable,
+            + WriteJournalEventsTable
+            + ReadInvocationEdgesTable
+            + WriteInvocationEdgesTable,
     {
         self.kill_child_invocations(&invocation_id, metadata.journal_metadata.length, &metadata)
             .await?;
@@ -2296,10 +3398,10 @@ impl<S> StateMachineApplyContext<'_, S> {
     ) -> Result<(), Error>
     where
         S: WriteInboxTable
+            + ReadVirtualObjectStatusTable
             + WriteVirtualObjectStatusTable
             + WriteInvocationStatusTable
             + ReadInvocationStatusTable
-            + WriteVirtualObjectStatusTable
             + ReadStateTable
             + WriteStateTable
             + WriteJournalTable
@@ -2311,7 +3413,9 @@ impl<S> StateMachineApplyContext<'_, S> {
             + ReadVQueueTable
             + WriteVQueueTable
             + WriteLockTable
-            + WriteJournalEventsTable,
+            + WriteJournalEventsTable
+            + ReadInvocationEdgesTable
+            + WriteInvocationEdgesTable,
     {
         self.kill_child_invocations(&invocation_id, metadata.journal_metadata.length, &metadata)
             .await?;
@@ -2544,7 +3648,8 @@ impl<S> StateMachineApplyContext<'_, S> {
             + WriteLockTable
             + journal_table_v2::WriteJournalTable
             + journal_table_v2::ReadJournalTable
-            + WriteJournalEventsTable,
+            + WriteJournalEventsTable
+            + LinkedServicesStorage,
     {
         let (key, value) = timer_value.into_inner();
         self.do_delete_timer(key).await?;
@@ -2603,6 +3708,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             + WriteInvocationStatusTable
             + WriteInboxTable
             + WriteFsmTable
+            + WriteOutboxTable
             + WriteJournalTable
             + journal_table_v2::WriteJournalTable,
     {
@@ -2667,7 +3773,9 @@ impl<S> StateMachineApplyContext<'_, S> {
             + WriteFsmTable
             + WriteTimerTable
             + WriteInboxTable
+            + ReadVirtualObjectStatusTable
             + WriteVirtualObjectStatusTable
+            + LinkedServicesStorage
             + journal_table_v2::WriteJournalTable
             + journal_table_v2::ReadJournalTable
             + ReadVQueueTable
@@ -2701,7 +3809,9 @@ impl<S> StateMachineApplyContext<'_, S> {
             + WriteFsmTable
             + WriteTimerTable
             + WriteInboxTable
+            + ReadVirtualObjectStatusTable
             + WriteVirtualObjectStatusTable
+            + LinkedServicesStorage
             + journal_table_v2::WriteJournalTable
             + journal_table_v2::ReadJournalTable
             + WriteJournalEventsTable
@@ -2947,7 +4057,10 @@ impl<S> StateMachineApplyContext<'_, S> {
             + WriteStateTable
             + WriteVQueueTable
             + WriteLockTable
-            + ReadVQueueTable,
+            + ReadVQueueTable
+            + LinkedServicesStorage
+            + ReadVirtualObjectStatusTable
+            + WriteVirtualObjectStatusTable,
     {
         entries::OnJournalEntryCommand::from_raw_entry(invocation_id, invocation_status, raw_entry)
             .apply(self)
@@ -2969,7 +4082,7 @@ impl<S> StateMachineApplyContext<'_, S> {
     async fn end_invocation(
         &mut self,
         invocation_id: InvocationId,
-        invocation_metadata: InFlightInvocationMetadata,
+        mut invocation_metadata: InFlightInvocationMetadata,
         flavor: Option<TerminationFlavor>,
         // If given, this will override any Output Entry available in the journal table
         response_result_override: Option<ResponseResult>,
@@ -2978,6 +4091,7 @@ impl<S> StateMachineApplyContext<'_, S> {
         S: WriteInboxTable
             + ReadInvocationStatusTable
             + WriteInvocationStatusTable
+            + ReadVirtualObjectStatusTable
             + WriteVirtualObjectStatusTable
             + WriteJournalTable
             + ReadJournalTable
@@ -2990,7 +4104,9 @@ impl<S> StateMachineApplyContext<'_, S> {
             + ReadVQueueTable
             + WriteVQueueTable
             + WriteLockTable
-            + WriteJournalEventsTable,
+            + WriteJournalEventsTable
+            + ReadInvocationEdgesTable
+            + WriteInvocationEdgesTable,
     {
         let invocation_target = invocation_metadata.invocation_target.clone();
         let journal_length = invocation_metadata.journal_metadata.length;
@@ -3004,9 +4120,17 @@ impl<S> StateMachineApplyContext<'_, S> {
 
         let vqueue_id = invocation_metadata.vqueue_id.clone();
         let mut end_status = vqueue_table::Status::Succeeded;
-        // If there are any response sinks, or we need to store back the completed status,
-        //  we need to find the latest output entry
-        if !invocation_metadata.response_sinks.is_empty() || !completion_retention.is_zero() {
+
+        // Check whether we need response_result: required if there are response sinks,
+        // completion retention is non-zero, OR this is a workflow run (Behavior 1 and 2).
+        let is_workflow_run = invocation_target.invocation_target_ty()
+            == InvocationTargetType::Workflow(WorkflowHandlerType::Workflow);
+        let linked_to_count = invocation_metadata.linked_to_count;
+        let needs_response_result = !invocation_metadata.response_sinks.is_empty()
+            || !completion_retention.is_zero()
+            || is_workflow_run;
+
+        if needs_response_result {
             let response_result = if let Some(response_result) = response_result_override {
                 response_result
             } else if let Some(response_result) = self
@@ -3042,14 +4166,77 @@ impl<S> StateMachineApplyContext<'_, S> {
                 }
             }
 
-            // Send responses out
+            // Behavior 2: for workflow run handlers, check for active LinkedTo children.
+            // If any exist, store InvocationStatus::Completing and return early — the invocation
+            // waits until all linked children complete (Task 5.3 handles the resume path).
+            // The linked_to_count gate avoids the RocksDB seek for the 99%+ of WI completions with no edges.
+            if is_workflow_run && linked_to_count > 0 {
+                let linked_to = self
+                    .storage
+                    .get_invocation_linked_to(&invocation_id)
+                    .await?;
+                let has_active_children = linked_to
+                    .iter()
+                    .any(|(_, es)| matches!(es, EdgeState::LinkedTo(LinkStatus::Active)));
+
+                if has_active_children {
+                    let active_count = linked_to
+                        .iter()
+                        .filter(|(_, es)| matches!(es, EdgeState::LinkedTo(LinkStatus::Active)))
+                        .count();
+                    info!(
+                        restate.invocation.id = %invocation_id,
+                        active_children = active_count,
+                        "Invocation entering Completing state — waiting for linked children to complete"
+                    );
+                    let completing = CompletingInvocation::from_in_flight_invocation_metadata(
+                        invocation_metadata,
+                        response_result,
+                    );
+                    self.storage
+                        .put_invocation_status(
+                            &invocation_id,
+                            &InvocationStatus::Completing(completing),
+                        )
+                        .map_err(Error::Storage)?;
+                    return Ok(());
+                }
+            }
+
+            // Send responses out. Retention for any ServiceCompletion sinks is carried on
+            // the sink target itself, inherited from the linker parent at link time.
+            // completing_entity is this WI itself — used for ServiceLinkNotification dispatch.
+            let response_sinks = std::mem::take(&mut invocation_metadata.response_sinks);
             self.send_response_to_sinks(
-                invocation_metadata.response_sinks.clone(),
+                response_sinks,
                 response_result.clone(),
                 Some(invocation_id),
                 None,
                 Some(&invocation_metadata.invocation_target),
+                Some(EntityId::WorkflowInvocation(invocation_id)),
             )?;
+
+            // Clean up all InvocationEdges (LinkedTo edges) for this invocation as part of teardown.
+            // linked_to_count gate avoids the RocksDB seek for invocations with no children.
+            // Cascade UnlinkRequests so children's linked_from_count is decremented and GC can fire.
+            if linked_to_count > 0 {
+                let linked_from = EntityId::WorkflowInvocation(invocation_id);
+                let children = self
+                    .storage
+                    .get_invocation_linked_to(&invocation_id)
+                    .await?;
+                for (linked_to, _) in children {
+                    self.handle_outgoing_message(OutboxMessage::UnlinkRequest(UnlinkRequest {
+                        linked_to,
+                        linked_from: linked_from.clone(),
+                        caller_invocation_id: invocation_id,
+                        caller_completion_id: None,
+                    }))?;
+                }
+                self.storage
+                    .delete_all_invocation_edges(&invocation_id)
+                    .map_err(Error::Storage)?;
+            }
 
             // Notify invocation result
             self.emit_invocation_end_span(
@@ -3112,6 +4299,18 @@ impl<S> StateMachineApplyContext<'_, S> {
                 // Invocation has been removed already!
                 return Ok(());
             };
+
+            if invocation_target.invocation_target_ty()
+                == InvocationTargetType::VirtualObject(VirtualObjectHandlerType::Exclusive)
+            {
+                let keyed_service_id = invocation_target.as_keyed_service_id().expect(
+                    "When the handler type is Exclusive, the invocation target must have a key",
+                );
+                // We consumed the inbox — unlock preserving any response_sinks
+                self.do_unlock_service(keyed_service_id).await?;
+            }
+
+
             let record_unique_ts =
                 UniqueTimestamp::from_unix_millis_unchecked(self.record_created_at);
 
@@ -3144,7 +4343,6 @@ impl<S> StateMachineApplyContext<'_, S> {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn send_response_to_sinks(
         &mut self,
         response_sinks: impl IntoIterator<Item = ServiceInvocationResponseSink>,
@@ -3152,6 +4350,10 @@ impl<S> StateMachineApplyContext<'_, S> {
         invocation_id: Option<InvocationId>,
         completion_expiry_time: Option<MillisSinceEpoch>,
         invocation_target: Option<&InvocationTarget>,
+        // The completing entity (linked-to side). Required for ServiceLinkNotification and
+        // InvocationLinkNotification sinks — they emit LinkCompletionNotification with this as
+        // the `linked_to` field. Pass None only when no link-notification sinks can be present.
+        completing_entity: Option<EntityId>,
     ) -> Result<(), Error>
     where
         S: WriteOutboxTable + WriteFsmTable,
@@ -3183,9 +4385,94 @@ impl<S> StateMachineApplyContext<'_, S> {
                         ResponseResult::Failure(err) => InvocationOutputResponse::Failure(err),
                     },
                 ),
+                // Retention for the spawned handler invocation is carried on `target` itself,
+                // inherited from the linker parent at link time. See `ServiceCompletionTarget`.
+                ServiceInvocationResponseSink::ServiceCompletion(target) => {
+                    self.fire_service_completion(target, result.clone())?
+                }
+                // Emit LinkCompletionNotification to the VO that linked to this entity.
+                ServiceInvocationResponseSink::ServiceLinkNotification { linked_from } => {
+                    let linked_to = completing_entity.clone().expect(
+                        "completing_entity must be provided when ServiceLinkNotification sinks are present"
+                    );
+                    self.handle_outgoing_message(OutboxMessage::LinkCompletionNotification(
+                        LinkCompletionNotification {
+                            linked_from: EntityId::Object(linked_from),
+                            linked_to,
+                        },
+                    ))?;
+                }
+                // Emit LinkCompletionNotification to the WI parent.
+                ServiceInvocationResponseSink::InvocationLinkNotification { linked_from } => {
+                    let linked_to = completing_entity.clone().expect(
+                        "completing_entity must be provided when InvocationLinkNotification sinks are present"
+                    );
+                    self.handle_outgoing_message(OutboxMessage::LinkCompletionNotification(
+                        LinkCompletionNotification {
+                            linked_from: EntityId::WorkflowInvocation(linked_from),
+                            linked_to,
+                        },
+                    ))?;
+                }
             }
         }
         Ok(())
+    }
+
+    /// Enqueue a handler invocation on the target VO with the result bytes as argument.
+    /// Used by `ServiceCompletion` sinks — fires the `onCompleted` handler registered during link.
+    ///
+    /// On `ResponseResult::Failure`, encodes the error as JSON using `serde_json` so the handler
+    /// can distinguish and react: `{"error_code": N, "message": "..."}`. This is safe against
+    /// messages containing quotes, backslashes, newlines, or other special characters.
+    ///
+    /// Retention for the spawned handler invocation is read from the sink `target` itself,
+    /// which was populated from the linker parent's retention at `LinkServiceCommand` /
+    /// `StartLinkedCommand` apply time and then persisted alongside the sink.
+    fn fire_service_completion(
+        &mut self,
+        target: ServiceCompletionTarget,
+        result: ResponseResult,
+    ) -> Result<(), Error>
+    where
+        S: WriteOutboxTable + WriteFsmTable,
+    {
+        let argument = match &result {
+            ResponseResult::Success(bytes) => bytes.clone(),
+            ResponseResult::Failure(err) => {
+                #[derive(serde::Serialize)]
+                struct FailurePayload<'a> {
+                    error_code: u16,
+                    message: &'a str,
+                }
+                let payload = FailurePayload {
+                    error_code: u16::from(err.code()),
+                    message: err.message(),
+                };
+                bytes::Bytes::from(
+                    serde_json::to_vec(&payload)
+                        .expect("FailurePayload is a trivial shape that cannot fail to serialize"),
+                )
+            }
+        };
+
+        let invocation_target = InvocationTarget::virtual_object(
+            target.service_id.service_name.clone(),
+            target.service_id.key.clone(),
+            target.handler_name,
+            VirtualObjectHandlerType::Exclusive,
+        );
+        let invocation_id = InvocationId::generate(&invocation_target, None);
+        let service_invocation = ServiceInvocation {
+            argument,
+            completion_retention_duration: target.completion_retention_duration,
+            journal_retention_duration: target.journal_retention_duration,
+            ..ServiceInvocation::initialize(invocation_id, invocation_target, Source::Internal)
+        };
+
+        self.handle_outgoing_message(OutboxMessage::ServiceInvocation(Box::new(
+            service_invocation,
+        )))
     }
 
     // [vqueues only]
@@ -3390,15 +4677,43 @@ impl<S> StateMachineApplyContext<'_, S> {
                     let keyed_service_id = invocation_target.as_keyed_service_id().expect(
                         "When the handler type is Exclusive, the invocation target must have a key",
                     );
-                    // Lock the service in the old status table.
-                    // Obsolete: Remove in lieu of using Locks when service status table is fully migrated to
-                    // locks table.
-                    self.storage
-                        .put_virtual_object_status(
-                            &keyed_service_id,
-                            &VirtualObjectStatus::Locked(invocation_id),
-                        )
-                        .map_err(Error::Storage)?;
+                    let current_status = self
+                        .storage
+                        .get_virtual_object_status(&keyed_service_id)
+                        .await?;
+                    match current_status {
+                        VirtualObjectStatus::Locked {
+                            invocation_id: iid, ..
+                        } => {
+                            panic!(
+                                "invariant violated trying to run an invocation {invocation_id} on a VO while another invocation {iid} is holding the lock"
+                            );
+                        }
+                        VirtualObjectStatus::Unlocked {
+                            response_sinks,
+                            linked_from_count,
+                        } => {
+                            // Lock the service, preserving existing response_sinks
+                            self.storage
+                                .put_virtual_object_status(
+                                    &keyed_service_id,
+                                    &VirtualObjectStatus::Locked {
+                                        invocation_id,
+                                        response_sinks,
+                                        linked_from_count,
+                                    },
+                                )
+                                .map_err(Error::Storage)?;
+                        }
+                        VirtualObjectStatus::Completed { .. } => {
+                            // VO transitions are Unlocked → Locked → Unlocked → ... → Completed
+                            // (terminal). Completed → Locked is structurally unreachable because
+                            // on_pre_flight_invocation rejects new invocations on a Completed VO.
+                            unreachable!(
+                                "Completed VO should not be relocked: invocation_id={invocation_id}"
+                            );
+                        }
+                    }
                 }
 
                 let (metadata, invocation_input) =
@@ -3427,8 +4742,46 @@ impl<S> StateMachineApplyContext<'_, S> {
                     invocation_input,
                 )?;
             }
-            _ => {
-                unreachable!("Invocation have started");
+            InvocationStatus::Invoked(metadata) if self.is_leader => {
+                // just send to invoker
+                debug_if_leader!(self.is_leader, "Invoke");
+                info!("Resuming invocation {invocation_id}, scheduler stats: {wait_stats:?}");
+                self.action_collector.push(Action::VQInvoke {
+                    qid,
+                    item_hash,
+                    invocation_id,
+                    invocation_target: metadata.invocation_target,
+                });
+            }
+            InvocationStatus::Invoked(_) => { /* do nothing when not leader */ }
+            // Suspended invocations must first be put back on inbox. On wake-up, they
+            // transition back into Invoked state. So seeing a suspended invocation
+            // here means that some state transition is missing.
+            InvocationStatus::Suspended { .. } | InvocationStatus::Paused(..) => {
+                panic!(
+                    "Parked invocation {invocation_id} cannot be attempted to run without first being woken up"
+                );
+            }
+            // it's not okay, ignore the attempt, possibly pop the item from running queue
+            // and mark completed.
+            InvocationStatus::Completing(..)
+            | InvocationStatus::Completed(..)
+            | InvocationStatus::Free => {
+                info!(
+                    "Will not run invocation {invocation_id} because it has been marked as completed/deleted already!"
+                );
+                // we delete by id because we are not really sure if the invocation is still in
+                // Stage::Inbox or not.
+                VQueues::end_by_id(
+                    self.storage,
+                    self.vqueues_cache,
+                    self.is_leader.then_some(self.action_collector),
+                    at,
+                    EntryKind::Invocation,
+                    invocation_id.partition_key(),
+                    &EntryId::from(invocation_id),
+                )
+                .await?;
             }
         }
         Ok(())
@@ -3439,11 +4792,13 @@ impl<S> StateMachineApplyContext<'_, S> {
     where
         S: WriteInboxTable
             + WriteVirtualObjectStatusTable
+            + ReadVirtualObjectStatusTable
             + ReadInvocationStatusTable
             + WriteInvocationStatusTable
-            + WriteVirtualObjectStatusTable
             + ReadStateTable
             + WriteStateTable
+            + WriteOutboxTable
+            + WriteFsmTable
             + WriteJournalTable
             + journal_table_v2::WriteJournalTable,
     {
@@ -3454,6 +4809,38 @@ impl<S> StateMachineApplyContext<'_, S> {
             let keyed_service_id = invocation_target.as_keyed_service_id().expect(
                 "When the handler type is Exclusive, the invocation target must have a key",
             );
+
+            // Check if the object has been completed — drain all inboxed invocations with an error
+            let service_status = self
+                .storage
+                .get_virtual_object_status(&keyed_service_id)
+                .await?;
+            if matches!(service_status, VirtualObjectStatus::Completed { .. }) {
+                debug_if_leader!(
+                    self.is_leader,
+                    rpc.service = %keyed_service_id,
+                    "Draining inbox of completed service object"
+                );
+                while let Some(inbox_entry) = self.storage.pop_inbox(&keyed_service_id).await? {
+                    if let InboxEntry::Invocation(_, invocation_id) = inbox_entry.inbox_entry {
+                        let inboxed_status = self.get_invocation_status(&invocation_id).await?;
+                        if let InvocationStatus::Inboxed(mut inboxed_invocation) = inboxed_status {
+                            self.send_response_to_sinks(
+                                inboxed_invocation.metadata.response_sinks.drain(),
+                                ResponseResult::Failure(SERVICE_COMPLETED_INVOCATION_ERROR),
+                                Some(invocation_id),
+                                None,
+                                Some(&inboxed_invocation.metadata.invocation_target),
+                                None,
+                            )?;
+                            self.storage
+                                .put_invocation_status(&invocation_id, &InvocationStatus::Free)
+                                .map_err(Error::Storage)?;
+                        }
+                    }
+                }
+                return Ok(());
+            }
 
             debug_if_leader!(
                 self.is_leader,
@@ -3480,11 +4867,36 @@ impl<S> StateMachineApplyContext<'_, S> {
                             "Invoke inboxed"
                         );
 
-                        // Lock the service
+                        // Lock the service, preserving existing response_sinks
+                        let current_status = self
+                            .storage
+                            .get_virtual_object_status(&keyed_service_id)
+                            .await?;
+                        let (response_sinks, linked_from_count) = match current_status {
+                            VirtualObjectStatus::Locked {
+                                response_sinks,
+                                linked_from_count,
+                                ..
+                            }
+                            | VirtualObjectStatus::Unlocked {
+                                response_sinks,
+                                linked_from_count,
+                            } => (response_sinks, linked_from_count),
+                            // VO transitions are Unlocked → Locked → Unlocked → ... → Completed
+                            // (terminal). Completed → Locked is structurally unreachable because
+                            // on_pre_flight_invocation rejects new invocations on a Completed VO.
+                            VirtualObjectStatus::Completed { .. } => unreachable!(
+                                "Completed VO should not be relocked: invocation_id={invocation_id}"
+                            ),
+                        };
                         self.storage
                             .put_virtual_object_status(
                                 &keyed_service_id,
-                                &VirtualObjectStatus::Locked(invocation_id),
+                                &VirtualObjectStatus::Locked {
+                                    invocation_id,
+                                    response_sinks,
+                                    linked_from_count,
+                                },
                             )
                             .map_err(Error::Storage)?;
 
@@ -3508,10 +4920,8 @@ impl<S> StateMachineApplyContext<'_, S> {
                 }
             }
 
-            // We consumed the inbox, nothing else to do here
-            self.storage
-                .put_virtual_object_status(&keyed_service_id, &VirtualObjectStatus::Unlocked)
-                .map_err(Error::Storage)?;
+            // We consumed the inbox — unlock preserving any response_sinks
+            self.do_unlock_service(keyed_service_id).await?;
         }
 
         Ok(())
@@ -3895,6 +5305,8 @@ impl<S> StateMachineApplyContext<'_, S> {
                         idempotency_key: request.idempotency_key,
                         limit_key: Default::default(),
                         submit_notification_sink: None,
+                        link_from: None,
+                        link_caller_completion_id: None,
                         restate_version: RestateVersion::current(),
                     });
 
@@ -3946,6 +5358,8 @@ impl<S> StateMachineApplyContext<'_, S> {
                     idempotency_key: request.idempotency_key,
                     limit_key: Default::default(),
                     submit_notification_sink: None,
+                    link_from: None,
+                    link_caller_completion_id: None,
                     restate_version: RestateVersion::current(),
                 });
 
@@ -4496,7 +5910,9 @@ impl<S> StateMachineApplyContext<'_, S> {
         S: ReadInvocationStatusTable
             + WriteInvocationStatusTable
             + WriteOutboxTable
-            + WriteFsmTable,
+            + WriteFsmTable
+            + ReadVirtualObjectStatusTable
+            + ReadOnlyIdempotencyTable,
     {
         debug_assert!(
             self.partition_key_range
@@ -4506,9 +5922,30 @@ impl<S> StateMachineApplyContext<'_, S> {
             self.partition_key_range
         );
 
-        let invocation_id = attach_invocation_request
-            .invocation_query
-            .to_invocation_id();
+        let invocation_id = match attach_invocation_request.invocation_query {
+            InvocationQuery::Invocation(iid) => iid,
+            ref q @ InvocationQuery::Workflow(ref sid) => {
+                match self.storage.get_virtual_object_status(sid).await? {
+                    VirtualObjectStatus::Locked {
+                        invocation_id: iid, ..
+                    } => iid,
+                    VirtualObjectStatus::Unlocked { .. }
+                    | VirtualObjectStatus::Completed { .. } => {
+                        // Try the deterministic id
+                        q.to_invocation_id()
+                    }
+                }
+            }
+            ref q @ InvocationQuery::IdempotencyId(ref iid) => {
+                match self.storage.get_idempotency_metadata(iid).await? {
+                    Some(idempotency_metadata) => idempotency_metadata.invocation_id,
+                    None => {
+                        // Try the deterministic id
+                        q.to_invocation_id()
+                    }
+                }
+            }
+        };
         match self.get_invocation_status(&invocation_id).await? {
             InvocationStatus::Free => self.send_response_to_sinks(
                 vec![attach_invocation_request.response_sink],
@@ -4516,11 +5953,13 @@ impl<S> StateMachineApplyContext<'_, S> {
                 Some(invocation_id),
                 None,
                 None,
+                None,
             )?,
             is @ InvocationStatus::Invoked(_)
             | is @ InvocationStatus::Suspended { .. }
             | is @ InvocationStatus::Inboxed(_)
             | is @ InvocationStatus::Paused(_)
+            | is @ InvocationStatus::Completing(_)
             | is @ InvocationStatus::Scheduled(_) => {
                 if attach_invocation_request.block_on_inflight {
                     self.do_append_response_sink(
@@ -4535,6 +5974,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                         Some(invocation_id),
                         None,
                         is.invocation_target(),
+                        None,
                     )?;
                 }
             }
@@ -4546,6 +5986,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                     Some(invocation_id),
                     completion_expiry_time,
                     Some(&completed.invocation_target),
+                    None,
                 )?;
             }
         }
@@ -4963,6 +6404,48 @@ impl<S> StateMachineApplyContext<'_, S> {
                     signal.id,
                 )
             }
+            OutboxMessage::LinkRequest(_) => {
+                debug_if_leader!(
+                    self.is_leader,
+                    restate.outbox.seq = seq_number,
+                    "Effect: Enqueuing link request",
+                )
+            }
+            OutboxMessage::LinkResponse(_) => {
+                debug_if_leader!(
+                    self.is_leader,
+                    restate.outbox.seq = seq_number,
+                    "Effect: Enqueuing link response",
+                )
+            }
+            OutboxMessage::UnlinkRequest(_) => {
+                debug_if_leader!(
+                    self.is_leader,
+                    restate.outbox.seq = seq_number,
+                    "Effect: Enqueuing unlink request",
+                )
+            }
+            OutboxMessage::UnlinkResponse(_) => {
+                debug_if_leader!(
+                    self.is_leader,
+                    restate.outbox.seq = seq_number,
+                    "Effect: Enqueuing unlink response",
+                )
+            }
+            OutboxMessage::LinkCompletionNotification(_) => {
+                debug_if_leader!(
+                    self.is_leader,
+                    restate.outbox.seq = seq_number,
+                    "Effect: Enqueuing link completion notification",
+                )
+            }
+            OutboxMessage::AttachServiceRequest(_) => {
+                debug_if_leader!(
+                    self.is_leader,
+                    restate.outbox.seq = seq_number,
+                    "Effect: Enqueuing attach service request",
+                )
+            }
         };
 
         self.storage
@@ -4980,6 +6463,48 @@ impl<S> StateMachineApplyContext<'_, S> {
 
         Ok(())
     }
+
+
+    async fn do_unlock_service(&mut self, service_id: ServiceId) -> Result<(), Error>
+    where
+        S: ReadVirtualObjectStatusTable + WriteVirtualObjectStatusTable,
+    {
+        debug_if_leader!(
+            self.is_leader,
+            rpc.service = %service_id.service_name,
+            "Effect: Unlock service id",
+        );
+
+        // Read current status to preserve any response_sinks accumulated while locked
+        let current = self.storage.get_virtual_object_status(&service_id).await?;
+        let (response_sinks, linked_from_count) = match current {
+            VirtualObjectStatus::Locked {
+                response_sinks,
+                linked_from_count,
+                ..
+            } => (response_sinks, linked_from_count),
+            VirtualObjectStatus::Unlocked {
+                response_sinks,
+                linked_from_count,
+            } => (response_sinks, linked_from_count),
+            VirtualObjectStatus::Completed { .. } => {
+                // Already completed — don't overwrite
+                return Ok(());
+            }
+        };
+        self.storage
+            .put_virtual_object_status(
+                &service_id,
+                &VirtualObjectStatus::Unlocked {
+                    response_sinks,
+                    linked_from_count,
+                },
+            )
+            .map_err(Error::Storage)?;
+
+        Ok(())
+    }
+
 
     #[tracing::instrument(
         skip_all,
@@ -5524,6 +7049,90 @@ impl<S> StateMachineApplyContext<'_, S> {
 
         Ok(())
     }
+
+    /// Apply the state mutation identified by the given qid and entry card.
+    async fn vqueue_mutate_state(
+        &mut self,
+        qid: VQueueId,
+        card: &EntryCard,
+        now: UniqueTimestamp,
+    ) -> Result<(), Error>
+    where
+        S: WriteVQueueTable + ReadVQueueTable + ReadStateTable + WriteStateTable,
+    {
+        if let Some(state_mutation) = self
+            .storage
+            .get_item::<ExternalStateMutation>(&qid, card.created_at, card.kind, &card.id)
+            .await?
+        {
+            self.mutate_state(&state_mutation).await?;
+
+            VQueues::new(
+                qid,
+                self.storage,
+                self.vqueues_cache,
+                self.is_leader.then_some(self.action_collector),
+            )
+            .end(now, Stage::Run, card)
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn on_attach_service(&mut self, request: AttachServiceRequest) -> Result<(), Error>
+    where
+        S: ReadVirtualObjectStatusTable
+            + WriteVirtualObjectStatusTable
+            + WriteOutboxTable
+            + WriteFsmTable,
+    {
+        let response_sink =
+            ServiceInvocationResponseSink::PartitionProcessor(JournalCompletionTarget {
+                caller_id: request.caller_id,
+                caller_completion_id: request.completion_id,
+            });
+
+        let mut status = self
+            .storage
+            .get_virtual_object_status(&request.target)
+            .await?;
+
+        match status {
+            VirtualObjectStatus::Completed { result, .. } => {
+                // Target already completed — immediately deliver result back to caller.
+                self.handle_outgoing_message(OutboxMessage::ServiceResponse(InvocationResponse {
+                    target: JournalCompletionTarget {
+                        caller_id: request.caller_id,
+                        caller_completion_id: request.completion_id,
+                    },
+                    result,
+                }))?;
+            }
+            _ => {
+                // Target still active — add PartitionProcessor sink to VO's response_sinks.
+                // AttachServiceCommand is purely for result delivery, not graph management;
+                // no LinkedFrom edge is written.
+                if let Some(sinks) = status.response_sinks_mut() {
+                    sinks.insert(response_sink);
+                    self.storage
+                        .put_virtual_object_status(&request.target, &status)
+                        .map_err(Error::Storage)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Cause for parking an invocation
+#[derive(Debug)]
+enum ParkCause {
+    /// The invocation suspends to await completion or signals
+    Suspend,
+    /// The invocation pauses because it depleted it retries or was manually paused
+    Pause,
 }
 
 // To write completions in the effects log

@@ -1,0 +1,87 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-09-044725",
+  "branch_name": "promise-objects",
+  "task_name": "promise-objects",
+  "session_number": 2,
+  "continuity": {
+    "started": "2026-04-07",
+    "sessions_reviewed": 1,
+    "arc_goal": "Implement promise objects and unified linking model supporting entity linking (objects) and invocation linking (workflows) with objects as persistent anchors"
+  },
+  "progress_update": {
+    "summary": "Fixed proto field number bugs and LinkCommand message type ID mismatch that caused SDK panics. Then evolved the linked workflows design through an extensive design session — arrived at a unified linking model where objects and workflow invocations are the two node types in a graph, with objects as the only anchors. Worked through storage schema: evolve existing ServiceStatus and InvocationStatus tables for node lifecycle, add new ServiceEdges and InvocationEdges tables for the graph edges.",
+    "goal": "Evolve the linked workflows/promise objects design into a unified linking model supporting entity linking (objects) and invocation linking (workflows), with objects as persistent anchors, fact accumulation, and GC by reachability from live objects.",
+    "accomplished": [
+      "Fixed ResolveCompletionNotificationMessage proto field numbers (void=13→4, failure=15→6) and result_completion_id (field 1→11) to match protocol conventions",
+      "Fixed LinkCommand message type ID from 0x040F to 0x0415 — root cause of SDK panic when sending LinkCommand",
+      "Added test asserting all command/notification type ID pairs share the same offset",
+      "Designed unified linking model: two node types (ObjectId=ServiceId, WorkflowInvocationId=ServiceId+InvocationUuid), four link combinations, one anchoring rule (live objects anchor everything)",
+      "Designed storage schema: evolve ServiceStatus (add Resolved), keep InvocationStatus, new ServiceEdges and InvocationEdges tables with LinkedTo/LinkedFrom edge labels"
+    ],
+    "now": "Design session complete. Ready to write the design doc capturing the unified linking model and storage schema decisions.",
+    "next_steps": [
+      "Write design doc capturing the unified linking model (supersedes promise_objects.md and linked_workflows_mvp.md)",
+      "Implement LinkChild outbox message to differentiate workflow links (start handler) from object links (establish link only)",
+      "Evolve VirtualObjectStatus to Unlocked|Locked(InvocationId)|Resolved(ResponseResult)",
+      "Add ServiceEdges and InvocationEdges KeyKind entries and table implementations"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Proto field numbers must match between server and sdk-shared-core",
+      "All tables are logical (2-byte KeyKind prefix) within one RocksDB CF per partition — no write amplification from multiple tables",
+      "InvocationId is (partition_key, invocation_uuid) — no ServiceId, so CompletedInvocation.invocation_target carries the service association",
+      "WriteBatch provides atomic writes across multiple logical tables in the same CF",
+      "Objects link as entities (ServiceId), workflow invocations link as invocations (InvocationId) — never reversed",
+      "ResolveCompletionNotification reserved fields: server includes 7,8 which SDK omits — server version is more conservative/correct"
+    ],
+    "decisions": [
+      "Two node types: ObjectId(ServiceId) and WorkflowInvocationId(ServiceId, InvocationUuid) — objects link as entities, workflows link as invocations",
+      "One anchoring rule: live objects are the only anchors, everything else is transient unless reachable from a live object",
+      "Edge labels: LinkedTo/LinkedFrom replacing ParentOf/ChildOf — directional without prescribing hierarchy",
+      "Storage: evolve existing ServiceStatus (add Resolved) and InvocationStatus (unchanged), new ServiceEdges ('se') and InvocationEdges ('ie') tables",
+      "VirtualObjectStatus becomes: Unlocked | Locked(InvocationId) | Resolved(ResponseResult) — three clean states",
+      "Mutation models: objects = transactional KV state (frozen on resolve), workflows = append-only journal (sealed on completion)",
+      "Separate edge tables by local node type — no local_type discriminator needed, table IS the discriminator",
+      "ResolveCommandMessage uses same wire layout as OutputCommandMessage plus result_completion_id=11 (completable+fallible)"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Should workflow invocations get invocation-scoped KV state in addition to journal? (discussed but not decided)",
+      "Where does revision counter live — on ObjectStatus record or keep as \\x00__revision in state table?",
+      "Remote side key encoding in edge tables — how to encode the variable-width remote node ID with type discriminator",
+      "Should SDK align to server's reserved declaration (add fields 7, 8) or should we drop them to match SDK?"
+    ],
+    "risks": [
+      "The design is a significant evolution from the current link table — migration path from existing LinkRelation/ChildOf/ParentOf needs planning"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "service-protocol/dev/restate/service/protocol.proto",
+      "crates/service-protocol-v4/src/message_codec/mod.rs",
+      "crates/storage-api/src/service_status_table/mod.rs",
+      "crates/storage-api/src/invocation_status_table/mod.rs",
+      "crates/storage-api/src/link_table/mod.rs",
+      "crates/partition-store/src/state_table/mod.rs",
+      "crates/partition-store/src/partition_store.rs",
+      "crates/partition-store/src/keys.rs",
+      "crates/worker/src/partition/state_machine/entries/resolve_command.rs",
+      "crates/worker/src/partition/state_machine/tests/linked_workflows.rs",
+      "crates/service-protocol-v4/src/entry_codec.rs",
+      "docs/design/promise_objects.md",
+      "docs/design/promise_objects_server_plan.md",
+      "docs/design/linked_workflows_mvp.md",
+      "docs/design/future_design_ideas_033126.md"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "cargo check -p restate-service-protocol-v4 -p restate-worker --all-targets",
+      "cargo nextest run -p restate-worker linked_workflow -p restate-service-protocol-v4 --all-features"
+    ]
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "39de37a4c"
+  }
+}

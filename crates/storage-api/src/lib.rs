@@ -65,6 +65,7 @@ impl From<OutOfMemory> for BudgetedReadError {
 pub mod deduplication_table;
 pub mod fsm_table;
 pub mod inbox_table;
+pub mod invocation_edges_table;
 pub mod invocation_status_table;
 pub mod journal_events;
 pub mod journal_table;
@@ -73,6 +74,7 @@ pub mod lock_table;
 pub mod outbox_table;
 pub mod promise_table;
 pub mod protobuf_types;
+pub mod service_edges_table;
 pub mod service_status_table;
 pub mod state_table;
 pub mod timer_table;
@@ -112,6 +114,27 @@ pub trait Storage {
     ) -> Self::TransactionType<'_>;
 }
 
+/// Convenience super-trait that bundles all four linked-services edge-table bounds.
+///
+/// Use `T: LinkedServicesStorage` instead of the verbose
+/// `T: ReadServiceEdgesTable + WriteServiceEdgesTable + ReadInvocationEdgesTable + WriteInvocationEdgesTable`
+/// in handler signatures.
+pub trait LinkedServicesStorage:
+    service_edges_table::ReadServiceEdgesTable
+    + service_edges_table::WriteServiceEdgesTable
+    + invocation_edges_table::ReadInvocationEdgesTable
+    + invocation_edges_table::WriteInvocationEdgesTable
+{
+}
+
+impl<T> LinkedServicesStorage for T where
+    T: service_edges_table::ReadServiceEdgesTable
+        + service_edges_table::WriteServiceEdgesTable
+        + invocation_edges_table::ReadInvocationEdgesTable
+        + invocation_edges_table::WriteInvocationEdgesTable
+{
+}
+
 pub trait Transaction:
     state_table::WriteStateTable
     + state_table::ReadStateTable
@@ -120,6 +143,10 @@ pub trait Transaction:
     + service_status_table::ReadVirtualObjectStatusTable
     + service_status_table::WriteVirtualObjectStatusTable
     + inbox_table::ReadInboxTable
+    + service_edges_table::ReadServiceEdgesTable
+    + service_edges_table::WriteServiceEdgesTable
+    + invocation_edges_table::ReadInvocationEdgesTable
+    + invocation_edges_table::WriteInvocationEdgesTable
     + inbox_table::WriteInboxTable
     + outbox_table::WriteOutboxTable
     + deduplication_table::WriteDeduplicationTable

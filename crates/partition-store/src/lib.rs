@@ -10,9 +10,11 @@
 
 pub mod deduplication_table;
 mod durable_lsn_tracking;
+mod edge_encoding;
 pub mod error;
 pub mod fsm_table;
 pub mod inbox_table;
+pub mod invocation_edges_table;
 pub mod invocation_status_table;
 pub mod journal_events;
 pub mod journal_table;
@@ -29,6 +31,7 @@ mod partition_store;
 mod partition_store_manager;
 pub mod promise_table;
 pub mod scan;
+pub mod service_edges_table;
 pub mod service_status_table;
 pub mod snapshots;
 pub mod state_table;

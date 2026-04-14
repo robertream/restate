@@ -1,0 +1,78 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-03-31-123106",
+  "branch_name": "service-macro",
+  "task_name": "service-macro",
+  "session_number": 4,
+  "continuity": {
+    "started": "2026-03-19",
+    "sessions_reviewed": 3,
+    "arc_goal": "Design the next evolution of Restate's process model — from isolated virtual objects to a connected graph of durable processes with structural relationships, efficient communication primitives, and real-time observability. Sessions 1-3 built SSE infrastructure and planned repartitioning. Session 4 pivoted to explore a larger vision: process composition primitives unified with an edge model, ownership via spawn, and a clean taxonomy of graph communication node types."
+  },
+  "progress_update": {
+    "summary": "We squashed 42 commits into one, validated (fmt/clippy/tests pass), pushed to `live-state-poc` branch. Then conducted a deep design session exploring Restate as durable language-agnostic Erlang/OTP. Produced an RFC proposing process composition primitives — unified edge model, ownership via spawn, reactive edges, broadcast channels, and output streams. Iterated through multiple rounds of critique, arriving at a clean taxonomy of four graph node types: LiveState, Broadcast, LiveAggregation, and Stream.",
+    "goal": "Design the next evolution of Restate's process model — from isolated virtual objects to a connected graph of durable processes with structural relationships, efficient communication primitives, and real-time observability.",
+    "accomplished": [
+      "Squashed 42 commits into 1, validated (cargo fmt/clippy/nextest all pass), pushed to `live-state-poc` branch on origin",
+      "Produced comprehensive design summary of the live-state-poc SSE architecture",
+      "Wrote RFC: Process Composition Primitives (unified edge model collapsing OTP links/monitors/groups into one primitive)",
+      "Iterated RFC through critique — identified edges vs channels as structurally distinct primitives",
+      "Arrived at 4 graph node types: LiveState (coalescable, one→many), Broadcast (ordered, one→many), LiveAggregation (coalescable, many→one), Stream (ordered, many→one)"
+    ],
+    "now": "Refining the taxonomy of graph communication primitives — LiveState vs Broadcast vs LiveAggregation vs Stream. Just established naming conventions where 'Live' prefix = coalescable/latest-value semantics.",
+    "next_steps": [
+      "Update RFC with the four node types taxonomy and edges-vs-channels distinction",
+      "Design the broadcast channel as partition-aware infrastructure backed by Bifrost",
+      "Prototype ctx.emit() + invocation introspection as the highest-value, lowest-complexity next step",
+      "Consider state migration (onUpgrade) as independent high-value feature"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Cross-partition edges are the hardest unsolved implementation problem",
+      "Broadcast channels need partition-local subscriber lists (not edge traversal at send time)",
+      "Reactive aggregation with algebraic guarantees may be over-designed for near-term needs",
+      "Sessions 1-3 built SSE infrastructure for state streaming; this is a foundation but Session 4 pivoted to larger vision rather than completing SSE repartitioning"
+    ],
+    "decisions": [
+      "Edges model structure (relationships, ownership, graph traversal). Channels model communication (message delivery, fan-out). Two distinct primitives, not one.",
+      "A 'Link' is two directed edges created atomically — no special Link type needed",
+      "A 'Group' is just a high in-degree node — no special Group type needed",
+      "Four graph node types: LiveState, Broadcast, LiveAggregation, Stream — distinguished by compaction policy and data flow direction",
+      "Ownership (ctx.spawn) vs subscription (ctx.edge) distinguished by edge property, not type",
+      "ctx.emit() and invocation introspection are highest-value, lowest-complexity features to ship next"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Should LiveAggregation fold functions be limited to built-ins or support user-defined?",
+      "How do broadcast channel partition-local subscriber lists interact with repartitioning?",
+      "What's the minimum SDK surface to validate the edge model?",
+      "Should the RFC be updated with the full four-node taxonomy before broader review?"
+    ],
+    "risks": [
+      "Vision is compelling but far from implementation — risk of designing the second floor while foundation is unproven",
+      "Cross-partition edge consistency may require distributed transactions or weaker guarantees than expected",
+      "OTP analogies may import assumptions that don't apply to durable execution (ephemeral vs persistent processes)"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/tasks/service-macro/research/rfc_process_composition_primitives_033126.md",
+      "crates/ingress-http/src/state_router.rs",
+      "crates/ingress-http/src/handler/objects.rs",
+      "crates/partition-store/src/partition_store.rs",
+      "crates/worker/src/partition_processor_manager/spawn_processor_task.rs",
+      "release-notes/unreleased/virtual-object-state-sse.md"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "cargo fmt --all -- --check",
+      "cargo clippy --all-targets --workspace -- -D warnings",
+      "cargo nextest run",
+      "git push -u origin live-state-poc"
+    ]
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "b1766c03b"
+  }
+}

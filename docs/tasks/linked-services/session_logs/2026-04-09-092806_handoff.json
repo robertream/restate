@@ -1,0 +1,92 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-09-092806",
+  "branch_name": "linked-services",
+  "task_name": "linked-services",
+  "session_number": 3,
+  "continuity": {
+    "started": "2026-04-08",
+    "sessions_reviewed": 2,
+    "arc_goal": "Design and implement linked services Phase A (object-to-object linking with completion, onCompleted handlers, GC cascade, state/invocation rejection on completed objects) while investigating and planning fix for issue #4566 (awakeable signals lost during partition leadership transitions)."
+  },
+  "progress_update": {
+    "summary": "We conducted deep research into GitHub issue #4566 — awakeable signals lost during partition leadership transitions. Traced the full root cause through the dedup mechanism, identified all 4 vulnerable call sites, designed the concrete fix (migrate to handle_rpc_proposal_command), analyzed performance impact (~2-10ms added latency, acceptable), and designed a multi-level test strategy with a primary failing-then-passing RPC handler test.",
+    "goal": "Design and implement linked services Phase A: object-to-object linking with completion, onCompleted handlers, GC cascade, and state/invocation rejection on completed objects. Side investigation: research and plan fix for issue #4566 (awakeable signal loss during leadership transitions).",
+    "accomplished": [
+      "Researched issue #4566 end-to-end: traced root cause through self_propose_and_respond_asynchronously → Bifrost commit confirmation → epoch-based dedup fencing in apply_record",
+      "Identified all 4 vulnerable call sites: append_signal, append_invocation_response, append_invocation (Appended mode), restart_as_new_invocation (legacy path)",
+      "Designed concrete fix: migrate to handle_rpc_proposal_command with new Action::ForwardAppendedResponse, phased implementation (signal first, then invocation response, then invoke)",
+      "Analyzed performance impact: +2-10ms typical latency (same as /send path), no throughput impact, acceptable for low-volume awakeable path",
+      "Designed multi-level test strategy: Level 1 RPC handler test (fails now, passes after fix), Level 2 dedup unit test, Level 3 state machine integration test"
+    ],
+    "now": "Completed test strategy design for issue #4566. Ready to either begin implementation of the fix or return to linked-services Phase A implementation.",
+    "next_steps": [
+      "Begin implementation of #4566 fix if prioritized: Phase 1 add ForwardAppendedResponse action, Phase 2 migrate append_signal, Phase 3 migrate append_invocation_response",
+      "Or resume linked-services Wave 1 implementation: ServiceEdges table, NodeId type, VirtualObjectStatus::Completed",
+      "Wave 2: Three vertical command slices (LinkService, CompleteService, UnlinkService)",
+      "Wave 3: State machine handlers (link establishment, completion + rejection, unlink + GC cascade)"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "All tables are logical (2-byte KeyKind prefix) within one RocksDB CF per partition",
+      "NodeId enum with Object variant only for Phase A",
+      "Proto type IDs: LinkService=0x0415/0x8015, CompleteService=0x0416/0x8016, UnlinkService=0x0417",
+      "NotifySignalRequest and InvocationResponse need Optional request_id field added for fix",
+      "WAL serialization must remain backward compatible (Option<T> defaults to None)",
+      "ServiceCompletionNotification and InvocationResponse are orthogonal — graph management vs result delivery",
+      "Completed objects reject new invocations at inbox AND state mutations from in-flight handlers",
+      "LinkedFrom edges are presence-only (empty value)",
+      "Direct cycle detection only (point read) — transitive cycles cause GC leak but not correctness issue"
+    ],
+    "decisions": [
+      "Strategy A (migrate to handle_rpc_proposal_command) chosen over drain-on-stepdown, separate dedup namespaces, or re-proposal approaches",
+      "Single Action::ForwardAppendedResponse rather than per-command action variants — all 3 high-priority sites return Appended",
+      "Level 1 RPC handler test as primary failing test — follows existing append_invocation.rs test patterns with MockActuator",
+      "Defer restart_as_new_invocation legacy path fix — it's being deprecated as fleet upgrades past protocol V4",
+      "Unlink (not RemoveLink) as the verb for edge removal — UnlinkServiceCommand, UnlinkServiceRequest, ctx.unlink()",
+      "VirtualObjectStatus: Unlocked | Locked(InvocationId) | Completed(ResponseResult) — mutually exclusive, Completed is terminal",
+      "Vertical command slices for linked-services implementation — each command task covers its full stack (journal + proto + codec + outbox + WAL)",
+      "EdgeState on LinkedTo: Active { completion_handler_name } | Completed — handler name consumed on completion, drops out",
+      "GC cascade: no parents + Completed → delete state/promises/status/edges + propagate UnlinkServiceRequest to children",
+      "Phase A ships independently from Phase B (invocation linking) — Phase A anchors only objects, Phase B adds WorkflowInvocation nodes"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Whether append_invocation Appended→Submitted response type change is a breaking API change for ingress",
+      "Whether WAL format version bump is needed for adding Option<PartitionProcessorRpcRequestId> to command payloads",
+      "No timeout on partition processor RPCs — pre-existing concern surfaced during analysis",
+      "handle.getOutput() for objects — how does a workflow await an object's completion result?",
+      "Batch GC optimization — batching UnlinkServiceRequest per destination partition (separate issue)"
+    ],
+    "risks": [
+      "Adding request_id to NotifySignalRequest changes WAL serialization — needs careful backward compatibility testing"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/tasks/linked-services/research/awakeable_signal_loss_issue_4566_040926.md",
+      "docs/design/linked_services.md",
+      "docs/tasks/linked-services/specs/tasks.md",
+      "crates/worker/src/partition/rpc/append_signal.rs",
+      "crates/worker/src/partition/rpc/append_invocation_response.rs",
+      "crates/worker/src/partition/rpc/append_invocation.rs",
+      "crates/worker/src/partition/leadership/leader_state.rs",
+      "crates/worker/src/partition/mod.rs",
+      "crates/worker/src/partition/state_machine/actions.rs",
+      "crates/storage-api/src/deduplication_table/mod.rs",
+      "crates/storage-api/src/service_status_table/mod.rs",
+      "crates/types/src/invocation/mod.rs",
+      "crates/types/src/journal_v2/command.rs",
+      "service-protocol/dev/restate/service/protocol.proto"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "gh issue view 4566 --repo restatedev/restate",
+      "git rev-parse HEAD"
+    ]
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "6965c1f7a"
+  }
+}

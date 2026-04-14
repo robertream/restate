@@ -1,0 +1,61 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-07-115607",
+  "branch_name": "main",
+  "task_name": "invoker-deployment-metrics",
+  "session_number": 1,
+  "progress_update": {
+    "summary": "We completed a full kickoff and design discussion for invoker deployment performance metrics (issues #4553 + #4454). Researched the invoker codebase deeply — invocation lifecycle, ResponseStream state machine, gardal token bucket internals, existing metrics patterns. Made all key design decisions through interactive discussion, finalized a metric spec (6 new metrics + 7 existing metrics gaining labels), created an implementation plan with 6 phases, and generated a task breakdown ready for execution. User posted the metric spec as a proposal comment on GitHub issue #4553.",
+    "goal": "Add deployment-level observability to the invoker subsystem so operators can distinguish slow user services from internal Restate bottlenecks. Combined single PR for #4553 (deployment performance metrics) and #4454 (more invoker metrics).",
+    "accomplished": [
+      "Deep codebase research: invoker lifecycle, ResponseStream, gardal token bucket API, metrics patterns",
+      "Interactive design discussion resolving all key decisions (label strategy, metric types, scope boundary, throttle approach)",
+      "Finalized metric spec: 6 new metrics + label enrichment on 7 existing metrics",
+      "Created kickoff document, task_context.md, implementation plan (plan.md), and task breakdown (tasks.md)",
+      "User posted metric spec proposal as comment on GitHub issue #4553"
+    ],
+    "now": "Task breakdown complete and approved. Ready for implementation execution.",
+    "next_steps": [
+      "Create feature branch and start implementation with Phase 1 (metric constants in metric_definitions.rs)",
+      "Implement Phase 2: HTTP latency instrumentation in ResponseStream + queue duration on InvokeCommand",
+      "Implement Phase 3: Active invocations gauge, throttle balance timer, label enrichment",
+      "Handle InvokeCommand serde issue (Instant doesn't impl Serialize — needs #[serde(skip, default)])"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "InvokeCommand derives Serialize/Deserialize — Instant field needs serde skip annotation",
+      "Active invocations gauge uses Option B: only track after PinnedDeployment (both labels known)",
+      "Existing invoker_id labels preserved on existing metrics — cleanup deferred to future PR"
+    ],
+    "decisions": [
+      "Combined #4553 + #4454 into single PR (overlapping label infrastructure)",
+      "service_name as primary label; deployment_id on HTTP + active invocations metrics",
+      "partition_id standardized for new metrics; throttle balance via periodic balance() sampling (~5s)"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Awaiting feedback on GitHub issue #4553 proposal comment from team",
+      "Whether to also post proposal on #4454"
+    ],
+    "risks": []
+  },
+  "working_set": {
+    "key_files": [
+      "docs/tasks/invoker-deployment-metrics/kickoff/invoker-deployment-metrics_kickoff.md",
+      "docs/tasks/invoker-deployment-metrics/task_context.md",
+      "docs/tasks/invoker-deployment-metrics/specs/plan.md",
+      "docs/tasks/invoker-deployment-metrics/specs/tasks.md",
+      "crates/invoker-impl/src/metric_definitions.rs",
+      "crates/invoker-impl/src/invocation_task/mod.rs",
+      "crates/invoker-impl/src/lib.rs",
+      "crates/invoker-impl/src/input_command.rs",
+      "crates/invoker-impl/src/quota.rs"
+    ],
+    "active_ids": [],
+    "recent_commands": []
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "b0a7a90d8"
+  }
+}

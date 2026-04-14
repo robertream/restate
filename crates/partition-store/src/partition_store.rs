@@ -144,6 +144,8 @@ pub enum TableKind {
     Promise,
     VQueue,
     Locks,
+    ServiceEdges,
+    InvocationEdges,
 }
 
 impl TableKind {
@@ -178,6 +180,8 @@ impl TableKind {
                 KeyKind::VQueueInput,
             ],
             Self::Locks => &[KeyKind::Lock],
+            Self::ServiceEdges => &[KeyKind::ServiceEdges],
+            Self::InvocationEdges => &[KeyKind::InvocationEdges],
         }
     }
 

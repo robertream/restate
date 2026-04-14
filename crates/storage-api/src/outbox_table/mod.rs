@@ -12,8 +12,9 @@ use std::ops::RangeInclusive;
 
 use restate_types::identifiers::{PartitionKey, WithPartitionKey};
 use restate_types::invocation::{
-    AttachInvocationRequest, InvocationResponse, InvocationTermination, NotifySignalRequest,
-    ServiceInvocation,
+    AttachInvocationRequest, AttachServiceRequest, InvocationResponse, InvocationTermination,
+    LinkCompletionNotification, LinkRequest, LinkResponse, NotifySignalRequest, ServiceInvocation,
+    UnlinkRequest, UnlinkResponse,
 };
 
 use crate::Result;
@@ -36,6 +37,24 @@ pub enum OutboxMessage {
 
     /// Notify signal request
     NotifySignal(NotifySignalRequest),
+
+    /// Link request: parent partition → child partition to register notification sinks
+    LinkRequest(LinkRequest),
+
+    /// Link response: child partition → parent partition to confirm/reject
+    LinkResponse(LinkResponse),
+
+    /// Unlink request: parent partition → child partition to remove notification sinks
+    UnlinkRequest(UnlinkRequest),
+
+    /// Unlink response: child partition → parent partition to acknowledge unlink
+    UnlinkResponse(UnlinkResponse),
+
+    /// Notify a parent partition that a child entity completed (unified sink-based notification)
+    LinkCompletionNotification(LinkCompletionNotification),
+
+    /// Attach service request: parent → child VO partition to add a completion sink
+    AttachServiceRequest(AttachServiceRequest),
 }
 
 impl PartitionStoreProtobufValue for OutboxMessage {
@@ -50,6 +69,12 @@ impl WithPartitionKey for OutboxMessage {
             OutboxMessage::InvocationTermination(it) => it.invocation_id.partition_key(),
             OutboxMessage::AttachInvocation(ai) => ai.partition_key(),
             OutboxMessage::NotifySignal(sig) => sig.partition_key(),
+            OutboxMessage::LinkRequest(req) => req.partition_key(),
+            OutboxMessage::LinkResponse(resp) => resp.partition_key(),
+            OutboxMessage::UnlinkRequest(req) => req.partition_key(),
+            OutboxMessage::UnlinkResponse(resp) => resp.partition_key(),
+            OutboxMessage::LinkCompletionNotification(notif) => notif.partition_key(),
+            OutboxMessage::AttachServiceRequest(req) => req.partition_key(),
         }
     }
 }

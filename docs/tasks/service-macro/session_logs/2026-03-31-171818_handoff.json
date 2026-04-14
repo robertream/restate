@@ -1,0 +1,76 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-03-31-171818",
+  "branch_name": "service-macro",
+  "task_name": "service-macro",
+  "session_number": 2,
+  "continuity": {
+    "started": "2026-03-31",
+    "sessions_reviewed": 1,
+    "arc_goal": "Produce a solid, internally consistent RFC for State Graph and Links that covers core semantics (links, workflow lifecycle with linked children, content-addressable frozen graphs) and composition patterns. Success = RFC can be handed to SDK and runtime implementers with no ambiguity."
+  },
+  "progress_update": {
+    "summary": "We continued refining the State Graph and Links RFC. Reviewed it end-to-end, identified semantic gaps, and resolved the major ones. Added the workflow returning→completed lifecycle where linked children block parent completion, guaranteeing frozen graphs are fully immutable. Clarified mutability contracts (links as delegated write permission), separated link status from completion handlers, added tree cancellation and timeouts. Then had a design discussion on Promise Objects (objects that freeze and participate in the completion tree) which led to the decision that exclusive shared handlers on workflows cover that use case. Content-addressable frozen state via Merkle trees was added to the core RFC design. Tiered storage deferred.",
+    "goal": "Produce a solid, internally consistent RFC for State Graph and Links that covers the core semantics of links, workflow lifecycle with linked children, content-addressable frozen graphs, and composition patterns. Success = the RFC can be handed to an SDK implementer and a runtime implementer with no ambiguity on the core model.",
+    "accomplished": [
+      "Resolved mutability contract: links are delegated write permission from object to runtime",
+      "Added workflow returning→completed lifecycle: linked children block parent completion, full graph freezes atomically",
+      "Added workflow tree cancellation (propagates cancel through links) and timeout semantics",
+      "Clarified completion handler execution: link status always updated by runtime, handlers queued as normal invocations",
+      "Simplified failure propagation: child failure updates link status, parent continues, no automatic propagation",
+      "Added content-addressable frozen state (Merkle trees) to the core RFC — root hash seals the entire computation graph",
+      "Design discussion on Promise Objects → decided exclusive shared handlers on workflows (Option A) is the path, deferred to future",
+      "Updated future_design_ideas with Promise Objects, content-addressable state, and exclusive handler decisions"
+    ],
+    "now": "Just completed adding content-addressable frozen state to the RFC and recording the exclusive shared handler decision (Option A) as final. RFC is in a solid state for the core semantic model.",
+    "next_steps": [
+      "Wire protocol / journal entry specification for links (deferred until semantics stable, but semantics are now stable)",
+      "Cross-partition link design sketch (deferred but acknowledged as common case)",
+      "Consider exclusive shared handlers on workflows as an RFC addition or separate RFC",
+      "Implementation planning for link storage in partition store"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Focus on semantics first, implementation details later",
+      "State Graph RFC stands alone — don't merge with Process Composition RFC",
+      "Failure propagation strategies deferred to future RFC",
+      "Tiered storage for frozen graphs deferred",
+      "Promise Objects deferred until linked workflow model is proven"
+    ],
+    "decisions": [
+      "Links are delegated write permission — object authorizes runtime to update link status on workflow completion",
+      "Workflow completion requires all linked children to complete recursively (returning→completed lifecycle)",
+      "Result is not observable until full completion",
+      "Child failure does NOT kill parent — link status updates, parent continues",
+      "Content-addressable frozen state (Merkle trees) is core design, not deferred",
+      "Exclusive shared handlers on workflows (Option A: queued, run when run is suspended) is the decided path for interactive workflows",
+      "Promise Objects deferred — exclusive shared handlers cover the use case",
+      "Graph curation is load-bearing — unlinked children don't block completion"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Should workflows have a default timeout or is no-timeout the default?",
+      "Link storage model: same column family as state or separate?",
+      "When exactly is the Merkle tree computed? (noted as implementation detail to defer)",
+      "Returning state: should it be observable to SSE clients or hidden?"
+    ],
+    "risks": [
+      "The two RFCs (State Graph vs Process Composition) have diverging models — may confuse future readers",
+      "Cross-partition links are deferred but most cross-service links will be cross-partition"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/rfcs/rfc_state_graph_and_links_033126.md",
+      "docs/rfcs/rfc_process_composition_primitives_033126.md",
+      "docs/rfcs/rfc_channels_033126.md",
+      "docs/design/future_design_ideas_033126.md"
+    ],
+    "active_ids": [],
+    "recent_commands": []
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "b1766c03b"
+  }
+}

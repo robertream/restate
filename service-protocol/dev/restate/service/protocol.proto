@@ -722,6 +722,174 @@ message CompleteAwakeableCommandMessage {
   string name = 12;
 }
 
+// Completable: Yes
+// Fallible: Yes
+// Type: 0x0400 + 15
+message LinkServiceCommandMessage {
+  string service_name = 1;
+  string service_key = 2;
+  optional string completion_handler_name = 3;
+
+  uint32 result_completion_id = 11;
+  string name = 12;
+}
+
+// Notification for LinkServiceCommandMessage
+// Type: 0x8015
+message LinkServiceCompletionNotificationMessage {
+  // See NotificationMessage above
+  reserved 2, 3, 4, 5, 7, 8, 12, 16, 17;
+
+  uint32 completion_id = 1;
+
+  oneof result {
+    // Success: carries the linked-to VO's service id as "service_name/key"
+    string service_id = 18;
+    Failure failure = 6;
+  };
+}
+
+// SDK → Server: complete the current keyed service object — freeze state and notify linked parents.
+// Completable: Yes
+// Fallible: Yes
+// Type: 0x0400 + 16
+message CompleteServiceCommandMessage {
+  oneof result {
+    Value value = 14;
+    Failure failure = 15;
+  };
+
+  uint32 result_completion_id = 11;
+  string name = 12;
+}
+
+// Notification for CompleteServiceCommandMessage
+// Type: 0x8016
+message CompleteServiceCompletionNotificationMessage {
+  // See NotificationMessage above
+  reserved 2, 3, 5, 7, 8, 12, 16, 17;
+
+  uint32 completion_id = 1;
+
+  oneof result {
+    Void void = 4;
+    Failure failure = 6;
+  };
+}
+
+// SDK → Server: unlink an existing VO child from the caller's service graph.
+// Completable: Yes
+// Fallible: Yes
+// Type: 0x0400 + 17
+message UnlinkServiceCommandMessage {
+  string service_name = 1;
+  string service_key = 2;
+  uint32 result_completion_id = 11;
+  string name = 12;
+}
+
+// Notification for UnlinkServiceCommandMessage
+// Type: 0x8017
+message UnlinkServiceCompletionNotificationMessage {
+  // See NotificationMessage above
+  reserved 2, 3, 5, 7, 8, 12, 16, 17;
+
+  uint32 completion_id = 1;
+
+  oneof result {
+    Void void = 4;
+    Failure failure = 6;
+  };
+}
+
+// Atomically starts a child workflow invocation and establishes a link in the service graph.
+// Completable: Yes
+// Fallible: Yes
+// Type: 0x0400 + 18
+message StartLinkedCommandMessage {
+  string service_name = 1;
+  string handler_name = 2;
+  bytes parameter = 3;
+  repeated Header headers = 4;
+  // If this invocation has a key associated (e.g. for workflows), then this key is filled in. Empty otherwise.
+  string key = 5;
+  // If present, it must be non empty.
+  optional string idempotency_key = 6;
+  reserved 7; // invoke_time removed: StartLinked is synchronous; delayed dispatch is incoherent
+  // Handler name to invoke on the parent (VO) when the child completes.
+  optional string completion_handler_name = 8;
+
+  uint32 result_completion_id = 11;
+  string name = 12;
+}
+
+// SDK → Server: unlink an existing WI child from the caller's service graph.
+// Completable: Yes
+// Fallible: Yes
+// Type: 0x0400 + 19
+message UnlinkInvocationCommandMessage {
+  // The WI child invocation id as a string
+  string invocation_id = 1;
+  uint32 result_completion_id = 11;
+  string name = 12;
+}
+
+// Notification for UnlinkInvocationCommandMessage
+// Type: 0x8019
+message UnlinkInvocationCompletionNotificationMessage {
+  // See NotificationMessage above
+  reserved 2, 3, 5, 7, 8, 12, 16, 17;
+
+  uint32 completion_id = 1;
+
+  oneof result {
+    Void void = 4;
+    Failure failure = 6;
+  };
+}
+
+// Parent awaits a linked VO child's completion result.
+// Sends a cross-partition AttachServiceRequest to the child VO partition.
+// Completable: Yes
+// Fallible: Yes
+// Type: 0x041C
+message AttachServiceCommandMessage {
+  string service_name = 1;
+  string service_key = 2;
+
+  uint32 result_completion_id = 11;
+  string name = 12;
+}
+
+// Notification for AttachServiceCommandMessage
+// Type: 0x801C
+message AttachServiceCompletionNotificationMessage {
+  // See NotificationMessage above
+  reserved 2, 3, 4, 12, 16, 17;
+
+  uint32 completion_id = 1;
+
+  oneof result {
+    Value value = 5;
+    Failure failure = 6;
+  };
+}
+
+// Notification for StartLinkedCommandMessage
+// Type: 0x8018
+message StartLinkedCompletionNotificationMessage {
+  // See NotificationMessage above
+  reserved 2, 3, 5, 7, 8, 12, 17;
+
+  uint32 completion_id = 1;
+
+  oneof result {
+    Failure failure = 6;
+    // Success: carries the child workflow's invocation id
+    string invocation_id = 16;
+  };
+}
+
 // Notification message for signals
 // Type: 0xFBFF
 message SignalNotificationMessage {

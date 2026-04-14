@@ -21,6 +21,7 @@ use restate_storage_api::invocation_status_table::{
 };
 use restate_storage_api::journal_table_v2::ReadJournalTable;
 use restate_storage_api::lock_table::WriteLockTable;
+use restate_storage_api::outbox_table::WriteOutboxTable;
 use restate_storage_api::service_status_table::{
     ReadVirtualObjectStatusTable, WriteVirtualObjectStatusTable,
 };
@@ -86,7 +87,8 @@ where
         + WriteLockTable
         + journal_table_v1::WriteJournalTable
         + journal_table_v2::WriteJournalTable
-        + ReadVQueueTable,
+        + ReadVQueueTable
+        + WriteOutboxTable,
 {
     async fn apply(self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
         let OnRestartAsNewInvocationCommand {
@@ -109,7 +111,8 @@ where
             }
             InvocationStatus::Invoked { .. }
             | InvocationStatus::Suspended { .. }
-            | InvocationStatus::Paused { .. } => {
+            | InvocationStatus::Paused { .. }
+            | InvocationStatus::Completing(_) => {
                 ctx.reply(response_sink, RestartAsNewInvocationResponse::StillRunning);
                 return Ok(());
             }

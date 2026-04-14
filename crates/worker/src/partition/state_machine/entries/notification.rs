@@ -69,6 +69,7 @@ where
             }
             InvocationStatus::Scheduled(_)
             | InvocationStatus::Inboxed(_)
+            | InvocationStatus::Completing(_)
             | InvocationStatus::Completed(_)
             | InvocationStatus::Free => {
                 // In all the other cases, just move on, nothing to do here.

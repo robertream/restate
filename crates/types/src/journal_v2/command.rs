@@ -68,6 +68,12 @@ pub enum Command {
     AttachInvocation(AttachInvocationCommand),
     GetInvocationOutput(GetInvocationOutputCommand),
     CompleteAwakeable(CompleteAwakeableCommand),
+    LinkService(LinkServiceCommand),
+    UnlinkService(UnlinkServiceCommand),
+    UnlinkInvocation(UnlinkInvocationCommand),
+    CompleteService(CompleteServiceCommand),
+    StartLinked(StartLinkedCommand),
+    AttachService(AttachServiceCommand),
 }
 
 impl fmt::Display for CommandType {
@@ -414,6 +420,110 @@ pub enum CompleteAwakeableResult {
     Success(Bytes),
     Failure(Failure),
 }
+
+/// Link to an existing keyed service object — establishes a parent→child edge in the service graph.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkServiceCommand {
+    pub link_to: crate::identifiers::ServiceId,
+    /// The onCompleted handler that fires on the caller (VO callers only).
+    /// WI callers do not use completion handlers — their response flows through
+    /// the invocation's response_sinks instead.
+    pub result_completion_handler: Option<ByteString>,
+    /// The journal completion_id that receives the link-establishment ack.
+    pub link_completion_id: CompletionId,
+    pub name: ByteString,
+}
+impl_command_accessors!(LinkService -> [@metadata @from_entry]);
+impl CommandMetadata for LinkServiceCommand {
+    fn related_completion_ids(&self) -> Vec<CompletionId> {
+        vec![self.link_completion_id]
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Unlink an existing VO child from the caller's service graph.
+/// The completion is delivered when the child partition acknowledges the unlink.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlinkServiceCommand {
+    pub unlink_from: crate::identifiers::ServiceId,
+    pub unlink_completion_id: CompletionId,
+    pub name: ByteString,
+}
+impl_command_accessors!(UnlinkService -> [@metadata @from_entry]);
+impl CommandMetadata for UnlinkServiceCommand {
+    fn related_completion_ids(&self) -> Vec<CompletionId> {
+        vec![self.unlink_completion_id]
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Unlink an existing WI child from the caller's service graph.
+/// The completion is delivered when the child partition acknowledges the unlink.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlinkInvocationCommand {
+    pub unlink_from: crate::identifiers::InvocationId,
+    pub unlink_completion_id: CompletionId,
+    pub name: ByteString,
+}
+impl_command_accessors!(UnlinkInvocation -> [@metadata @from_entry]);
+impl CommandMetadata for UnlinkInvocationCommand {
+    fn related_completion_ids(&self) -> Vec<CompletionId> {
+        vec![self.unlink_completion_id]
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Complete the current keyed service object — freeze state and notify linked parents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompleteServiceCommand {
+    pub result: crate::invocation::ResponseResult,
+    pub completion_id: CompletionId,
+    pub name: ByteString,
+}
+impl_command_accessors!(CompleteService -> [@metadata @from_entry @result_completion]);
+
+/// Atomically starts a child workflow invocation and establishes a link in the service graph.
+/// The parent writes `LinkedTo(Active)` and enqueues a `ServiceInvocation` with a `Link` response
+/// sink. The completion is delivered asynchronously via `LinkResponse` when the child partition
+/// confirms or rejects the link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartLinkedCommand {
+    pub request: CallRequest,
+    pub result_completion_handler: Option<ByteString>,
+    pub link_completion_id: CompletionId,
+    pub name: ByteString,
+}
+impl_command_accessors!(StartLinked -> [@metadata @from_entry]);
+impl CommandMetadata for StartLinkedCommand {
+    fn related_completion_ids(&self) -> Vec<CompletionId> {
+        vec![self.link_completion_id]
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Await a linked VO child's completion result.
+/// Sends a cross-partition `AttachServiceRequest` to the child VO; when the VO completes,
+/// a `LinkCompletionNotification` is delivered to `completion_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachServiceCommand {
+    /// The child VO service identity (from `LinkServiceCommand`'s `LinkResponse` handle).
+    pub attach_to: crate::identifiers::ServiceId,
+    pub completion_id: CompletionId,
+    pub name: ByteString,
+}
+impl_command_accessors!(AttachService -> [@metadata @from_entry @result_completion]);
 
 #[cfg(any(test, feature = "test-util"))]
 mod test_util {

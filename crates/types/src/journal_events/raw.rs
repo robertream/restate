@@ -191,6 +191,12 @@ mod pb {
                 journal_v2::CommandType::AttachInvocation => Self::AttachInvocation,
                 journal_v2::CommandType::GetInvocationOutput => Self::GetInvocationOutput,
                 journal_v2::CommandType::CompleteAwakeable => Self::CompleteAwakeable,
+                journal_v2::CommandType::LinkService => Self::LinkService,
+                journal_v2::CommandType::UnlinkService => Self::UnlinkService,
+                journal_v2::CommandType::CompleteService => Self::CompleteService,
+                journal_v2::CommandType::StartLinked => Self::StartLinked,
+                journal_v2::CommandType::UnlinkInvocation => Self::UnlinkInvocation,
+                journal_v2::CommandType::AttachService => Self::AttachService,
             }
         }
     }
@@ -220,6 +226,12 @@ mod pb {
                     Self::GetInvocationOutput
                 }
                 transient_error_event::CommandType::CompleteAwakeable => Self::CompleteAwakeable,
+                transient_error_event::CommandType::LinkService => Self::LinkService,
+                transient_error_event::CommandType::UnlinkService => Self::UnlinkService,
+                transient_error_event::CommandType::CompleteService => Self::CompleteService,
+                transient_error_event::CommandType::StartLinked => Self::StartLinked,
+                transient_error_event::CommandType::UnlinkInvocation => Self::UnlinkInvocation,
+                transient_error_event::CommandType::AttachService => Self::AttachService,
             }
         }
     }

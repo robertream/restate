@@ -83,6 +83,10 @@ pub enum KeyKind {
     // # Locks
     // locks for scoped and unscoped virtual objects and workflows
     Lock,
+    // Edges where the local side is an object (service edges)
+    ServiceEdges,
+    // Edges where the local side is a workflow invocation (invocation edges)
+    InvocationEdges,
 }
 
 impl KeyKind {
@@ -146,6 +150,8 @@ impl KeyKind {
             KeyKind::VQueueSuspendedStage => b"qS",
             KeyKind::VQueuePausedStage => b"qP",
             KeyKind::VQueueFinishedStage => b"qF",
+            KeyKind::ServiceEdges => b"se",
+            KeyKind::InvocationEdges => b"ie",
         }
     }
 
@@ -189,6 +195,8 @@ impl KeyKind {
             b"qS" => Some(KeyKind::VQueueSuspendedStage),
             b"qP" => Some(KeyKind::VQueuePausedStage),
             b"qF" => Some(KeyKind::VQueueFinishedStage),
+            b"se" => Some(KeyKind::ServiceEdges),
+            b"ie" => Some(KeyKind::InvocationEdges),
             _ => None,
         }
     }

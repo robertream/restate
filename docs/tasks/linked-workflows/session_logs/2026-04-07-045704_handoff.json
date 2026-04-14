@@ -1,0 +1,113 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-07-045704",
+  "branch_name": "linked-workflows",
+  "task_name": "linked-workflows",
+  "session_number": 10,
+  "continuity": {
+    "started": "2026-04-02",
+    "sessions_reviewed": 3,
+    "arc_goal": "Implement linked workflows with complete lifecycle management: MVP (create/complete/cancel/remove), Link GC (bidirectional records, purge guard, cross-partition cleanup), onCompleted handler for VOs with handler invocation on child completion. Ship production-ready feature with clean commits."
+  },
+  "progress_update": {
+    "summary": "We implemented the onCompleted handler feature, aligned protos with sdk-shared-core, squashed the branch to 2 clean commits, cleaned up stale branches, and started rebasing onto upstream main. Hit conflicts rebasing live-state-poc onto main (129 upstream commits) — aborted and left for next session.",
+    "goal": "Linked workflows with complete lifecycle management and onCompleted handler for VOs. Branch ready for merge.",
+    "accomplished": [
+      "Implemented onCompleted handler: completion_handler_name on LinkCommand, stored in ChildStatus::Running on ParentOf record, fired from on_link_completion_notification via ChildStatus::complete()",
+      "Type refactoring: EdgeLabel+LinkState → LinkRelation+ChildStatus with ChildStatus::complete() transition method",
+      "Added ServiceInvocation::internal_handler_invocation factory + encode_handler_argument helper (raw bytes for success, proto-encoded Failure for failure)",
+      "Aligned server proto with sdk-shared-core: handler→handler_name on LinkCommandMessage, string invocation_id field 16 on LinkCompletionNotificationMessage, renamed LinkedNotificationMessage→LinkCompletionNotificationMessage in SDK",
+      "Squashed 30 commits into 2 clean commits: linked workflows MVP + onCompleted handler",
+      "Cleaned up stale branches: deleted service-macro and improvement-service-macro",
+      "Removed accidentally committed docs/tasks/service-macro/ from live-state-poc",
+      "Updated origin/main from upstream (129 commits), pushed to origin"
+    ],
+    "now": "Rebasing live-state-poc onto updated main — hit 9 conflicting files (SSE state routing feature vs upstream changes). Aborted rebase. live-state-poc still on old base. linked-workflows is rebased onto live-state-poc and clean.",
+    "next_steps": [
+      "Resolve live-state-poc rebase conflicts onto main (9 files: ingress-http, node, partition-store, storage-api, worker)",
+      "Rebase linked-workflows onto rebased live-state-poc",
+      "Run full test suite after rebase",
+      "Review promise_objects.md design doc — ready for implementation after rebase"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "live-state-poc rebase has 9 conflicting files across ingress-http, node, partition-store, storage-api, worker",
+      "Server uses LinkCompletionNotificationMessage (gen_message! macro convention), SDK now matches",
+      "linked-workflows-backup branch preserves original 30-commit history",
+      "edge_label is part of RocksDB key for directed prefix scans",
+      "are_linked does two point reads (ParentOf + ChildOf)",
+      "VO clear state only deletes ParentOf links, preserves ChildOf",
+      "Check-before-write on ChildOf in AttachInvocation prevents race condition overwrite",
+      "Direct cycles prevented by key collision; transitive cycles not detected",
+      "Cross-partition links from day one — all link operations use outbox messages",
+      "Only workflows can enter Completing — VOs complete immediately regardless of links",
+      "Links keyed by (local_service_id, remote_service_id, edge_label) with edge_label in key",
+      "HandlerInvocation creates Exclusive handler invocation on parent VO",
+      "Restart-as-new disallowed on linked workflows",
+      "VO parents only (SDK controls, no server-side validation)",
+      "Children can be VOs or workflows",
+      "Handler name stored in ChildStatus::Running on ParentOf record — consumed at Running→Completed transition",
+      "No changes to response sinks, outbox messages, or completion fan-out path",
+      "RemoveLink: deleting ParentOf is sufficient — stale LinkCompletionNotification handling covers cleanup",
+      "encode_handler_argument uses two-step chain through journal_v2::Failure → proto::Failure",
+      "Handler invocation is fire-and-forget with normal retry semantics"
+    ],
+    "decisions": [
+      "Squashed to 2 commits: (1) linked workflows MVP with all infrastructure, (2) onCompleted handler with type refactoring",
+      "Renamed LinkedNotificationMessage→LinkCompletionNotificationMessage in sdk-shared-core to match server's gen_message! macro convention",
+      "Removed docs/tasks/service-macro/ from live-state-poc — accidentally staged planning artifacts",
+      "Deleted service-macro and improvement-service-macro branches — fully contained in live-state-poc",
+      "EdgeLabel::ParentOf/ChildOf enum with local_service_id/remote_service_id naming",
+      "are_linked(a, b) checks both directions — used for cycle prevention in CreateLink",
+      "VO clear state preserves ChildOf records — only deletes outgoing ParentOf links and notifies children",
+      "Removed label field entirely — links identified by child_service_id, not arbitrary label string",
+      "Extracted cancel_linked_children helper used by cancel (Invoked/Suspended/Paused + Completing) and kill (Completing)",
+      "Link barrier check moved outside sinks/retention guard — workflows always enter Completing with running links",
+      "No active_children_count — query link table for Running links instead of maintaining denormalized counter",
+      "Completion delivers Result<T, E> only — no status field, no inline frozen graph",
+      "Completing variant carries InFlightInvocationMetadata + buffered ResponseResult",
+      "RemoveLink included in MVP — graph curation is load-bearing",
+      "End-to-end integration test included in MVP scope",
+      "Cancellation is local per node — each node cancels its own direct children",
+      "HandlerInvocation targets VirtualObjectHandlerType::Exclusive — handler runs under object's exclusive lock",
+      "CreateLink proto uses result_completion_id field (not RawCommand metadata) matching AttachInvocation pattern",
+      "Lite decoding for CreateLink/RemoveLink returns graceful DecodingError — DataFusion skips these entries",
+      "Store completion_handler_name on ParentOf record, not on response sinks — eliminates sink removal, RemoveParentLink changes, and send_response_to_sinks modifications entirely",
+      "Type refactoring: EdgeLabel+LinkState → LinkRelation(ParentOf(ChildStatus)|ChildOf) + ChildStatus(Running(Option<CompletionHandlerName>)|Completed(ResponseResult))",
+      "ChildStatus::complete() method for state transition — consumes Running, yields Completed + handler name by ownership",
+      "ServiceInvocation::internal_handler_invocation factory — shared between HandlerInvocation sink and on_link_completion_notification",
+      "Fix HandlerInvocation sink to pass proto-encoded Failure instead of Bytes::new() — unreleased code, no backward compat concern",
+      "No VO-only validation at server level — SDK controls which parent types can set completion_handler_name",
+      "No new LinkedCompletionResult proto wrapper — reuse existing Value/Failure pattern"
+    ],
+    "blockers": [
+      "live-state-poc rebase onto main has 9 merge conflicts that need manual resolution"
+    ],
+    "open_questions": [],
+    "risks": [
+      "SSE state routing (live-state-poc) may have significant conflicts with 129 upstream commits touching ingress-http, worker, partition-store"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "service-protocol/dev/restate/service/protocol.proto",
+      "crates/service-protocol-v4/src/entry_codec.rs",
+      "crates/service-protocol-v4/src/message_codec/mod.rs",
+      "crates/invoker-impl/src/invocation_task/service_protocol_runner_v4.rs",
+      "crates/worker/src/partition/state_machine/mod.rs",
+      "crates/storage-api/src/link_table/mod.rs",
+      "docs/design/vo_child_link_on_completed.md",
+      "docs/design/promise_objects.md"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "git rebase main (on live-state-poc — aborted due to conflicts)",
+      "cargo nextest run -p restate-worker linked_workflow -p restate-partition-store link_table",
+      "git push origin main"
+    ]
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "997543328"
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-03-31-125956",
+  "branch_name": "service-macro",
+  "task_name": "service-macro",
+  "session_number": 5,
+  "progress_update": {
+    "summary": "Deep design session building on the live-state-poc SSE infrastructure. We refined the RFC's graph communication model — separated edges (structural) from channels (communication), established a 2x2 taxonomy of graph node types (LiveState/Broadcast/LiveAggregation/Stream), explored ownership-based spawn with cascading lifecycle, reactive edges, and scatter-gather patterns. Key late-session insight: workflow state is inherently observable (progress during execution, result on success, frozen on failure), distinct from LiveState which is an explicit standalone coordination node. Critiqued our own work — identified ctx.emit() and invocation introspection as highest-value next steps, parked reactive aggregation and supervision policies as over-designed.",
+    "goal": "Design the next evolution of Restate's process model — from isolated virtual objects to a connected graph of durable processes with structural relationships, efficient communication primitives, and real-time observability. Core principle: observable state is first-class in the model.",
+    "accomplished": [
+      "Squashed 42 commits into 1, validated (cargo fmt/clippy/nextest pass), pushed to `live-state-poc` branch",
+      "Wrote RFC: Process Composition Primitives — unified edge model, then refined through multiple critique rounds",
+      "Separated edges (structural: relationships, ownership, traversal) from channels (communication: message delivery, fan-out) as distinct primitives",
+      "Established 2x2 taxonomy: LiveState (coalescable 1-to-N), Broadcast (ordered 1-to-N), LiveAggregation (coalescable N-to-1), Stream (ordered N-to-1)",
+      "Distinguished workflow state (implicit, runtime-managed) from LiveState (explicit, developer-created) — both observable via ego graph SSE",
+      "Self-critiqued: identified over-design (reactive aggregation, capability handles, supervision policies) and grounded priorities"
+    ],
+    "now": "Completed design critique. Identified that the session's most useful output is a principle (observable state is first-class) plus concrete next steps (ctx.emit, introspection, onUpgrade). The RFC needs updating with edges-vs-channels distinction but shipping the SSE POC should not be blocked by it.",
+    "next_steps": [
+      "Ship SSE POC independently — it's built, tested, and working",
+      "Implement ctx.emit() + invocation introspection endpoint (high value, bounded scope)",
+      "Implement onUpgrade state migration (independent, solves real pain point)",
+      "Write focused design doc on edge storage model (intra-partition first)",
+      "Update RFC with edges-vs-channels distinction and four-node taxonomy as conceptual framework"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Cross-partition edges are the hardest unsolved implementation problem — start intra-partition",
+      "Broadcast channels need partition-local subscriber lists backed by Bifrost, not edge traversal",
+      "OTP analogies useful for vocabulary but Restate's durability changes failure semantics fundamentally",
+      "Don't let the RFC/vision work block shipping the working SSE POC"
+    ],
+    "decisions": [
+      "Edges model structure, channels model communication — two distinct primitives",
+      "Four graph node types: LiveState, Broadcast, LiveAggregation, Stream — distinguished by compaction policy and data flow direction",
+      "Workflow state is implicit and runtime-managed (progress during execution, result on success, frozen on failure). LiveState is explicit and developer-managed. Both observable.",
+      "Observable state is first-class in the model — the core design principle",
+      "ctx.emit() and invocation introspection are highest-value lowest-complexity features to ship next",
+      "Parked: reactive aggregation, capability handles, supervision policies, selective receive — revisit when real demand emerges"
+    ],
+    "open_questions": [
+      "How does broadcast channel partition-local subscriber list interact with repartitioning?",
+      "How does the runtime set workflow result into state on completion — new key? merge?",
+      "What's the minimum SDK surface to validate the edge model?",
+      "Should the four-node taxonomy be encoded in the RFC or kept as mental model until prototyped?"
+    ],
+    "risks": [
+      "Vision is compelling but far from implementation — risk of over-designing before proving foundations",
+      "Cross-partition edge consistency may require weaker guarantees than expected",
+      "The four-node taxonomy may collapse further once implementation reveals constraints",
+      "Session generated features from OTP analogy rather than user stories — need real use cases to validate"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/tasks/service-macro/research/rfc_process_composition_primitives_033126.md",
+      "crates/ingress-http/src/state_router.rs",
+      "crates/ingress-http/src/handler/objects.rs",
+      "crates/partition-store/src/partition_store.rs",
+      "crates/worker/src/partition_processor_manager/spawn_processor_task.rs",
+      "release-notes/unreleased/virtual-object-state-sse.md"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "cargo fmt --all -- --check",
+      "cargo clippy --all-targets --workspace -- -D warnings",
+      "cargo nextest run",
+      "git push -u origin live-state-poc"
+    ]
+  },
+  "continuity": {
+    "started": "2026-03-19",
+    "sessions_reviewed": 4,
+    "arc_goal": "Sessions 1-3 built SSE infrastructure (StateRouter, repartition support, state change detection). Session 4 pivoted to larger vision (RFC, edge model, OTP comparison). Session 5 critiqued and refined — separated edges from channels, established taxonomy, grounded priorities. The arc moves from working infrastructure to design vision to pragmatic next steps."
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "b1766c03b"
+  }
+}

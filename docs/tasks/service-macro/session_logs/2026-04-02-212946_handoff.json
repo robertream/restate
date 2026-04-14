@@ -1,0 +1,82 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-02-212946",
+  "branch_name": "service-macro",
+  "task_name": "service-macro",
+  "session_number": 4,
+  "continuity": {
+    "started": "2026-03-31",
+    "sessions_reviewed": 3,
+    "arc_goal": "Produce a focused, internally consistent RFC suite for State Graph and Links with precise implementation details — journal entries, new types, completion semantics, and cross-partition mechanics specified. Core RFC is scoped to linked workflows only, orthogonal concerns extracted to standalone RFCs. Success = RFC suite can guide implementation with no ambiguity on the model."
+  },
+  "progress_update": {
+    "summary": "We conducted a deep plan review of the Linked Workflows RFC suite, going through each of 9 simplification opportunities interactively. The dialog produced major design clarifications: completion delivers Result<T,E> only (no inline graph), a new Completing invocation status variant, precise journal entry specification (OneWayCallCommand + CreateLink + AttachInvocationCommand), new response sink variants (Link, HandlerInvocation), a new LinkCompletionNotification message type, cross-partition links from day one, and onCompleted as object-only. We then updated all RFC documents to reflect these decisions, deleted the Content-Addressable Graphs RFC, and updated the bullet point design doc.",
+    "goal": "Produce a focused, internally consistent RFC suite for State Graph and Links with precise implementation details — journal entries, new types, completion semantics, and cross-partition mechanics all specified. Success = RFC can guide implementation with no ambiguity on the core model.",
+    "accomplished": [
+      "Interactive plan review of 9 simplification opportunities — each discussed and resolved with the user",
+      "Specified exact journal entries for linked workflow creation: OneWayCallCommand + CreateLink + optional AttachInvocationCommand",
+      "Designed new types: ServiceInvocationResponseSink::Link, ServiceInvocationResponseSink::HandlerInvocation, LinkCompletionNotification message, InvocationStatus::Completing",
+      "Established that onCompleted is object-only (workflows just await), cross-partition is day-one, no framework timeout defaults",
+      "Updated all RFC documents: rewrote State Graph RFC, deleted Content-Addressable Graphs RFC, trimmed State Introspection RFC (removed speculative REST API), updated Future Design Ideas, updated bullet point design doc"
+    ],
+    "now": "Just completed all document updates. All RFCs and design docs reflect the plan review decisions.",
+    "next_steps": [
+      "Implementation planning — break the RFC into concrete implementation tasks",
+      "Link table schema design — fields, indexes, query patterns",
+      "Graph traversal API design — how parents inspect frozen state graphs of completed children",
+      "Prototype CreateLink journal entry and LinkCompletionNotification message flow"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Cross-partition links from day one — all link operations use outbox messages",
+      "Completing is a new InvocationStatus variant — touches 29 files / 298 occurrences",
+      "Links stored in dedicated table, not state keys",
+      "onCompleted only for virtual objects — workflows await via AttachInvocationCommand"
+    ],
+    "decisions": [
+      "Completion delivers Result<T,E> only — no status field, no inline frozen graph",
+      "New InvocationStatus::Completing variant for 'handler done, waiting for linked children'",
+      "Journal entries: OneWayCallCommand (start child) + CreateLink (link table + register Link sink) + optional AttachInvocationCommand (explicit await or onCompleted)",
+      "New ServiceInvocationResponseSink::Link variant generates LinkCompletionNotification on child completion",
+      "New ServiceInvocationResponseSink::HandlerInvocation variant for onCompleted on virtual objects",
+      "LinkCompletionNotification is a new message type distinct from InvocationResponse",
+      "Children blocking parent completion is essential — not optional, not deferrable",
+      "Cancellation is local per node — each node cancels its own direct children",
+      "No framework-level timeout defaults — owner controls via cancellation",
+      "Content-Addressable Graphs RFC deleted entirely — powerful idea for later, not essential now",
+      "State Introspection REST API removed — was speculative, needs its own design discussion",
+      "Link table stores the child's result directly — links outlive invocation retention"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Link table schema — what fields, indexes, and query patterns?",
+      "Graph traversal API — how does a parent inspect frozen state graph of completed children?",
+      "Completing variant internals — what data does it carry? InFlightInvocationMetadata? Return value? Active children count?",
+      "Orphan GC policy — default timeout for orphaned workflows?"
+    ],
+    "risks": [
+      "Completing variant touches 29 files — significant but compiler-guided ripple",
+      "Cross-partition link creation requires outbox coordination — adds latency to link setup"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/rfcs/rfc_state_graph_and_links_033126.md",
+      "docs/rfcs/rfc_state_introspection_033126.md",
+      "docs/design/linked_workflows_mvp.md",
+      "docs/design/future_design_ideas_033126.md",
+      "crates/storage-api/src/invocation_status_table/mod.rs",
+      "crates/worker/src/partition/state_machine/entries/call_commands.rs",
+      "crates/worker/src/partition/state_machine/entries/attach_invocation_command.rs",
+      "crates/worker/src/partition/state_machine/lifecycle/cancel.rs",
+      "crates/types/src/invocation/mod.rs",
+      "crates/types/src/journal_v2/command.rs"
+    ],
+    "active_ids": [],
+    "recent_commands": []
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "b1766c03b"
+  }
+}

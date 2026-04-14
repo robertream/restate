@@ -49,6 +49,14 @@ impl OutboxMessageExt for OutboxMessage {
             OutboxMessage::InvocationTermination(it) => Command::TerminateInvocation(it),
             OutboxMessage::AttachInvocation(ai) => Command::AttachInvocation(ai),
             OutboxMessage::NotifySignal(notify_signal) => Command::NotifySignal(notify_signal),
+            OutboxMessage::LinkRequest(req) => Command::LinkRequest(req),
+            OutboxMessage::LinkResponse(resp) => Command::LinkResponse(resp),
+            OutboxMessage::UnlinkRequest(req) => Command::UnlinkRequest(req),
+            OutboxMessage::UnlinkResponse(resp) => Command::UnlinkResponse(resp),
+            OutboxMessage::LinkCompletionNotification(notif) => {
+                Command::LinkCompletionNotification(notif)
+            }
+            OutboxMessage::AttachServiceRequest(req) => Command::AttachServiceRequest(req),
         }
     }
 }

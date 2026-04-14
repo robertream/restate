@@ -1,0 +1,77 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-03-31-152744",
+  "branch_name": "service-macro",
+  "task_name": "service-macro",
+  "session_number": 6,
+  "progress_update": {
+    "summary": "Extended design session continuing from session 5. We refined the execution model significantly: workflow state freezes on completion (both success and failure), result is a separate return value (same as today), links provide a status window (running/success/failed + result). Developed link semantics: collections per service type, shared ownership with ref-counted GC, optional completion handlers for flow control, graph curation by workflows before returning. Separated the RFC into three documents: State Graph & Links (focused), Channels (placeholder), and Future Design Ideas (parked concepts). Session ended discussing docs directory cleanup — current structure under docs/tasks/service-macro/ is a spectre artifact, not meaningful organization.",
+    "goal": "Design the state graph and links model for Restate — making relationships between objects and workflows explicit, workflow progress observable, and computation graphs inspectable and retainable as data products.",
+    "accomplished": [
+      "Refined execution model: workflow state freezes on completion (success AND failure), result is separate return value, both immutable after completion",
+      "Designed link semantics: status window (running/success/failed + result), collections by service type, shared ownership (multiple linkers, ref-counted GC), completion handlers for flow control",
+      "Established workflow graph curation: workflows clean up children before returning, retained graph is queryable via link, separate from result value",
+      "Split RFC into 3 docs: rfc_state_graph_and_links (focused), rfc_channels (placeholder), future_design_ideas (parked supervision, backpressure, reactive edges, etc.)",
+      "Produced comprehensive gap analysis between old RFC and current thinking, identified everything that was out of date"
+    ],
+    "now": "User raised that docs/tasks/service-macro/ directory structure is a spectre artifact and needs cleanup. The RFCs should live somewhere more meaningful. Pending decision on where: docs/rfcs/, docs/design/, or out of docs/ entirely.",
+    "next_steps": [
+      "Clean up docs directory — move RFCs to a better location (docs/rfcs/ or docs/design/)",
+      "Ship SSE POC independently",
+      "Implement ctx.emit() + invocation introspection endpoint",
+      "Implement onUpgrade state migration",
+      "Begin link storage design (intra-partition first)"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Cross-partition links are deferred — start intra-partition",
+      "Don't let RFC work block shipping the working SSE POC",
+      "Channels design is deferred until state graph is proven"
+    ],
+    "decisions": [
+      "Workflow state freezes on completion (both success and failure). Result is a separate return value, same as Restate works today.",
+      "Links provide status window: running/success/failed + result. Completion handlers are optional for flow control.",
+      "Multiple objects can link to the same entity — shared ownership with ref-counted GC. Spawner is not special.",
+      "Workflow graph is separate from result. Children and state retained via links regardless of return value. Workflows curate graph before returning.",
+      "The retained graph is a first-class data product (learning, analytics, visualization, reporting), not just debugging.",
+      "Object's API surface is purely domain — no plumbing handlers needed for receiving workflow results.",
+      "Separated into 3 RFCs: State Graph (focused), Channels (placeholder), Future Ideas (parked)"
+    ],
+    "open_questions": [
+      "Where should RFCs live in the repo? docs/rfcs/, docs/design/, or outside docs/?",
+      "Link storage model: same column family as state or separate?",
+      "How is link status updated when a linked workflow completes?",
+      "Graph curation timing: what happens if workflow crashes before curating?"
+    ],
+    "risks": [
+      "Docs directory needs cleanup before more files accumulate in the wrong place",
+      "The execution model documentation is the most important output but lives in an untracked file on a feature branch"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/tasks/service-macro/research/rfc_state_graph_and_links_033126.md",
+      "docs/tasks/service-macro/research/future_design_ideas_033126.md",
+      "docs/tasks/service-macro/research/rfc_channels_033126.md",
+      "docs/tasks/service-macro/research/rfc_process_composition_primitives_033126.md",
+      "crates/ingress-http/src/state_router.rs",
+      "release-notes/unreleased/virtual-object-state-sse.md"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "cargo fmt --all -- --check",
+      "cargo clippy --all-targets --workspace -- -D warnings",
+      "cargo nextest run",
+      "git push -u origin live-state-poc"
+    ]
+  },
+  "continuity": {
+    "started": "2026-03-19",
+    "sessions_reviewed": 5,
+    "arc_goal": "Sessions 1-3 built SSE infrastructure. Session 4 pivoted to vision (OTP comparison, original RFC). Session 5 critiqued and refined (edges vs channels, four-node taxonomy). Session 6 deepened the execution model (workflow state lifecycle, link semantics, graph curation, shared ownership) and separated into focused RFCs. The design is now grounded in concrete semantics rather than OTP analogy."
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "b1766c03b"
+  }
+}

@@ -98,6 +98,8 @@ fn invoke_cmd() -> Command {
         submit_notification_sink: Some(
             restate_types::invocation::SubmitNotificationSink::Ingress { request_id },
         ),
+        link_from: None,
+        link_caller_completion_id: None,
         restate_version: RestateVersion::current(),
     }))
 }

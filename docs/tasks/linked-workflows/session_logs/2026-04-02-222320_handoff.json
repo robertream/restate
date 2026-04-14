@@ -1,0 +1,78 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-02-222320",
+  "branch_name": "linked-workflows",
+  "task_name": "linked-workflows",
+  "session_number": 2,
+  "continuity": {
+    "started": "2026-04-02",
+    "sessions_reviewed": 1,
+    "arc_goal": "Implement linked workflows MVP — parent-to-child workflow links with completion blocking, cross-partition cancellation, and observable state graphs. Success = end-to-end integration test passes with full create/complete/cancel/remove flow."
+  },
+  "progress_update": {
+    "summary": "We conducted a thorough plan review of the linked workflows MVP implementation plan, identifying and agreeing on 8 simplifications. Rewrote the plan with vertical-slice phases, strict TDD, and significantly reduced scope. The plan is now leaner and ready for task breakdown and implementation.",
+    "goal": "Implement linked workflows MVP with cross-partition support. Success = parent workflow starts linked child, child blocks parent completion, cancellation propagates through link tree, RemoveLink orphans child, end-to-end integration test passes.",
+    "accomplished": [
+      "Completed detailed plan review with 3 parallel codebase analysis agents (InvocationStatus blast radius, ServiceInvocationResponseSink usage, outbox message patterns)",
+      "Agreed on 8 simplifications: defer onCompleted/HandlerInvocation sink, drop active_children_count (query link table), reuse AttachInvocation outbox for sink registration, vertical slice phases, parent-keyed only link table, omit child_invocation_id, drop ScanLinkTable, strict TDD",
+      "Rewrote implementation plan with 3 vertical-slice phases instead of 6 horizontal phases",
+      "Updated design doc deferred section to include onCompleted deferral",
+      "Verified Completing variant needs full InFlightInvocationMetadata for transition to Completed"
+    ],
+    "now": "Just completed the plan rewrite. All simplifications incorporated. Plan is ready for task breakdown via /spectre:create_tasks.",
+    "next_steps": [
+      "Create task breakdown from the updated plan via /spectre:create_tasks",
+      "Phase 1: Link table storage stack + CreateLink journal entry + Link sink variant (TDD)",
+      "Phase 2: Completing variant + LinkCompletionNotification + completion path changes (TDD happy path)",
+      "Phase 3: RemoveLink + cancel propagation through links (TDD unhappy path)"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Cross-partition links from day one — all link operations use outbox messages",
+      "Completing variant touches ~25 match sites (compiler-guided)",
+      "Links stored in dedicated table with parent-keyed index only",
+      "Strict TDD — red-green-refactor, no deferred coverage tasks",
+      "Restart-as-new disallowed on linked workflows (prevents stale notification issues)"
+    ],
+    "decisions": [
+      "No active_children_count — query link table for Running links instead of maintaining denormalized counter",
+      "No child_invocation_id — links are entity-to-entity (ServiceId → ServiceId), disallow restart-as-new on linked workflows",
+      "Defer HandlerInvocation sink / onCompleted to post-MVP — objects use AttachInvocationCommand with PartitionProcessor sink instead",
+      "Completion delivers Result<T, E> only — no status field, no inline frozen graph",
+      "Completing variant carries InFlightInvocationMetadata + buffered ResponseResult, no active_children_count",
+      "Link table keyed by parent entity only (with parent-keyed index)",
+      "RemoveLink included in MVP — graph curation is load-bearing",
+      "End-to-end integration test included in MVP scope",
+      "Cancellation is local per node — each node cancels its own direct children"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Graph traversal API — how does a parent inspect the frozen state graph of completed children? (deferred)",
+      "Orphan GC policy — default timeout for orphaned workflows? (deferred)"
+    ],
+    "risks": [
+      "Completing variant touches ~25 files — significant but compiler-guided ripple",
+      "New OutboxMessage::LinkCompletionNotification variant requires wiring through WAL protocol, shuffler, and state machine dispatch"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/plans/specs/plan_linked_workflows.md",
+      "docs/design/linked_workflows_mvp.md",
+      "docs/rfcs/rfc_state_graph_and_links_033126.md",
+      "crates/storage-api/src/invocation_status_table/mod.rs",
+      "crates/types/src/invocation/mod.rs",
+      "crates/storage-api/src/promise_table/mod.rs",
+      "crates/storage-api/src/outbox_table/mod.rs",
+      "crates/worker/src/partition/state_machine/mod.rs",
+      "crates/worker/src/partition/state_machine/lifecycle/cancel.rs",
+      "crates/partition-store/src/keys.rs"
+    ],
+    "active_ids": [],
+    "recent_commands": []
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "aad6e97e7"
+  }
+}

@@ -9,20 +9,25 @@
 // by the Apache License, Version 2.0.
 
 mod attach_invocation_command;
+mod attach_service_command;
 mod call_commands;
 mod clear_all_state_command;
 mod clear_state_command;
 mod complete_awakeable_command;
 mod complete_promise_command;
+mod complete_service_command;
 mod get_invocation_output_command;
 mod get_lazy_state_command;
 mod get_lazy_state_keys_command;
 mod get_promise_command;
+mod link_service_command;
 mod notification;
 mod peek_promise_command;
 mod send_signal_command;
 mod set_state_command;
 mod sleep_command;
+mod start_linked_command;
+mod unlink_service_command;
 
 use std::collections::VecDeque;
 
@@ -30,6 +35,7 @@ use metrics::counter;
 use tracing::debug;
 
 use restate_service_protocol_v4::entry_codec::ServiceProtocolV4Codec;
+use restate_storage_api::LinkedServicesStorage;
 use restate_storage_api::fsm_table::WriteFsmTable;
 use restate_storage_api::invocation_status_table::{
     InvocationStatus, ReadInvocationStatusTable, WriteInvocationStatusTable,
@@ -39,6 +45,9 @@ use restate_storage_api::journal_table_v2::{ReadJournalTable, WriteJournalTable}
 use restate_storage_api::lock_table::WriteLockTable;
 use restate_storage_api::outbox_table::WriteOutboxTable;
 use restate_storage_api::promise_table::{ReadPromiseTable, WritePromiseTable};
+use restate_storage_api::service_status_table::{
+    ReadVirtualObjectStatusTable, WriteVirtualObjectStatusTable,
+};
 use restate_storage_api::state_table::{ReadStateTable, WriteStateTable};
 use restate_storage_api::timer_table::WriteTimerTable;
 use restate_storage_api::vqueue_table::{ReadVQueueTable, WriteVQueueTable};
@@ -52,6 +61,7 @@ use restate_types::storage::{StoredRawEntry, StoredRawEntryHeader};
 use crate::debug_if_leader;
 use crate::metric_definitions::USAGE_LEADER_JOURNAL_ENTRY_COUNT;
 use crate::partition::state_machine::entries::attach_invocation_command::ApplyAttachInvocationCommand;
+use crate::partition::state_machine::entries::attach_service_command::ApplyAttachServiceCommand;
 use crate::partition::state_machine::entries::call_commands::{
     ApplyCallCommand, ApplyOneWayCallCommand,
 };
@@ -59,15 +69,21 @@ use crate::partition::state_machine::entries::clear_all_state_command::ApplyClea
 use crate::partition::state_machine::entries::clear_state_command::ApplyClearStateCommand;
 use crate::partition::state_machine::entries::complete_awakeable_command::ApplyCompleteAwakeableCommand;
 use crate::partition::state_machine::entries::complete_promise_command::ApplyCompletePromiseCommand;
+use crate::partition::state_machine::entries::complete_service_command::ApplyCompleteServiceCommand;
 use crate::partition::state_machine::entries::get_invocation_output_command::ApplyGetInvocationOutputCommand;
 use crate::partition::state_machine::entries::get_lazy_state_command::ApplyGetLazyStateCommand;
 use crate::partition::state_machine::entries::get_lazy_state_keys_command::ApplyGetLazyStateKeysCommand;
 use crate::partition::state_machine::entries::get_promise_command::ApplyGetPromiseCommand;
+use crate::partition::state_machine::entries::link_service_command::ApplyLinkServiceCommand;
 use crate::partition::state_machine::entries::notification::ApplyNotificationCommand;
 use crate::partition::state_machine::entries::peek_promise_command::ApplyPeekPromiseCommand;
 use crate::partition::state_machine::entries::send_signal_command::ApplySendSignalCommand;
 use crate::partition::state_machine::entries::set_state_command::ApplySetStateCommand;
 use crate::partition::state_machine::entries::sleep_command::ApplySleepCommand;
+use crate::partition::state_machine::entries::start_linked_command::ApplyStartLinkedCommand;
+use crate::partition::state_machine::entries::unlink_service_command::{
+    ApplyUnlinkInvocationCommand, ApplyUnlinkServiceCommand,
+};
 use crate::partition::state_machine::lifecycle::VerifyOrMigrateJournalTableToV2Command;
 use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext};
 
@@ -121,7 +137,10 @@ where
         + WriteStateTable
         + WriteVQueueTable
         + WriteLockTable
-        + ReadVQueueTable,
+        + ReadVQueueTable
+        + LinkedServicesStorage
+        + ReadVirtualObjectStatusTable
+        + WriteVirtualObjectStatusTable,
 {
     async fn apply(mut self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
         if !matches!(self.invocation_status, InvocationStatus::Invoked(_))
@@ -187,7 +206,7 @@ where
                         Command::GetLazyState(entry) => {
                             ApplyGetLazyStateCommand {
                                 invocation_id: self.invocation_id,
-                                invocation_status: &self.invocation_status,
+                                invocation_status: &mut self.invocation_status,
                                 entry,
                                 completions_to_process: &mut entries,
                             }
@@ -269,7 +288,7 @@ where
                         Command::Sleep(entry) => {
                             ApplySleepCommand {
                                 invocation_id: self.invocation_id,
-                                invocation_status: &self.invocation_status,
+                                invocation_status: &mut self.invocation_status,
                                 entry,
                                 completions_to_process: &mut entries,
                             }
@@ -280,7 +299,7 @@ where
                         Command::Call(entry) => {
                             ApplyCallCommand {
                                 invocation_id: self.invocation_id,
-                                invocation_status: &self.invocation_status,
+                                invocation_status: &mut self.invocation_status,
                                 entry,
                                 completions_to_process: &mut entries,
                             }
@@ -290,7 +309,7 @@ where
                         Command::OneWayCall(entry) => {
                             ApplyOneWayCallCommand {
                                 invocation_id: self.invocation_id,
-                                invocation_status: &self.invocation_status,
+                                invocation_status: &mut self.invocation_status,
                                 entry,
                                 completions_to_process: &mut entries,
                             }
@@ -300,7 +319,7 @@ where
                         Command::SendSignal(entry) => {
                             ApplySendSignalCommand {
                                 invocation_id: self.invocation_id,
-                                invocation_status: &self.invocation_status,
+                                invocation_status: &mut self.invocation_status,
                                 entry,
                                 completions_to_process: &mut entries,
                             }
@@ -310,7 +329,7 @@ where
                         Command::AttachInvocation(entry) => {
                             ApplyAttachInvocationCommand {
                                 invocation_id: self.invocation_id,
-                                invocation_status: &self.invocation_status,
+                                invocation_status: &mut self.invocation_status,
                                 entry,
                                 completions_to_process: &mut entries,
                             }
@@ -320,7 +339,7 @@ where
                         Command::GetInvocationOutput(entry) => {
                             ApplyGetInvocationOutputCommand {
                                 invocation_id: self.invocation_id,
-                                invocation_status: &self.invocation_status,
+                                invocation_status: &mut self.invocation_status,
                                 entry,
                                 completions_to_process: &mut entries,
                             }
@@ -330,7 +349,68 @@ where
                         Command::CompleteAwakeable(entry) => {
                             ApplyCompleteAwakeableCommand {
                                 invocation_id: self.invocation_id,
-                                invocation_status: &self.invocation_status,
+                                invocation_status: &mut self.invocation_status,
+                                entry,
+                                completions_to_process: &mut entries,
+                            }
+                            .apply(ctx)
+                            .await?;
+                        }
+                        Command::LinkService(entry) => {
+                            ApplyLinkServiceCommand {
+                                invocation_id: self.invocation_id,
+                                invocation_status: &mut self.invocation_status,
+                                entry,
+                                completions_to_process: &mut entries,
+                            }
+                            .apply(ctx)
+                            .await?;
+                        }
+                        Command::UnlinkService(entry) => {
+                            ApplyUnlinkServiceCommand {
+                                invocation_id: self.invocation_id,
+                                invocation_status: &mut self.invocation_status,
+                                entry,
+                                completions_to_process: &mut entries,
+                            }
+                            .apply(ctx)
+                            .await?;
+                        }
+                        Command::UnlinkInvocation(entry) => {
+                            ApplyUnlinkInvocationCommand {
+                                invocation_id: self.invocation_id,
+                                invocation_status: &mut self.invocation_status,
+                                entry,
+                                completions_to_process: &mut entries,
+                            }
+                            .apply(ctx)
+                            .await?;
+                        }
+                        Command::CompleteService(entry) => {
+                            ApplyCompleteServiceCommand {
+                                invocation_id: self.invocation_id,
+                                invocation_status: &mut self.invocation_status,
+                                entry,
+                                completions_to_process: &mut entries,
+                            }
+                            .apply(ctx)
+                            .await?;
+                        }
+                        Command::StartLinked(entry) => {
+                            ApplyStartLinkedCommand {
+                                invocation_id: self.invocation_id,
+                                invocation_status: &mut self.invocation_status,
+                                entry,
+                                completions_to_process: &mut entries,
+                            }
+                            .apply(ctx)
+                            .await?;
+                        }
+
+                        Command::AttachService(entry) => {
+                            ApplyAttachServiceCommand {
+                                invocation_id: self.invocation_id,
+                                invocation_status: &mut self.invocation_status,
                                 entry,
                                 completions_to_process: &mut entries,
                             }
@@ -407,7 +487,7 @@ where
 
 struct ApplyJournalCommandEffect<'e, CMD> {
     invocation_id: InvocationId,
-    invocation_status: &'e InvocationStatus,
+    invocation_status: &'e mut InvocationStatus,
     entry: CMD,
     completions_to_process: &'e mut VecDeque<RawEntry>,
 }

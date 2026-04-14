@@ -14,7 +14,7 @@ use bytes::Bytes;
 use enum_dispatch::enum_dispatch;
 use serde::{Deserialize, Serialize};
 
-use crate::identifiers::InvocationId;
+use crate::identifiers::{InvocationId, ServiceId};
 use crate::journal_v2::raw::{RawEntry, TryFromEntry, TryFromEntryError};
 use crate::journal_v2::{
     CompletionId, Encoder, Entry, EntryMetadata, EntryType, Failure, SignalIndex, SignalName,
@@ -131,6 +131,12 @@ pub enum Completion {
     Run(RunCompletion),
     AttachInvocation(AttachInvocationCompletion),
     GetInvocationOutput(GetInvocationOutputCompletion),
+    LinkService(LinkServiceCompletion),
+    UnlinkService(UnlinkServiceCompletion),
+    UnlinkInvocation(UnlinkInvocationCompletion),
+    CompleteService(CompleteServiceCompletion),
+    StartLinked(StartLinkedCompletion),
+    AttachService(AttachServiceCompletion),
 }
 
 impl fmt::Display for CompletionType {
@@ -414,6 +420,87 @@ impl From<Signal> for Entry {
         Self::Notification(v.into())
     }
 }
+
+/// Result of a `LinkServiceCommand` — either success (linked VO handle) or failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkServiceCompletion {
+    pub completion_id: CompletionId,
+    pub result: LinkServiceResult,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinkServiceResult {
+    /// Link established — carries the linked-to VO's `ServiceId` as the handle.
+    Success(ServiceId),
+    Failure(Failure),
+}
+impl_completion_accessors!(LinkService);
+
+/// Result of a `CompleteServiceCommand` — either success (void) or failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompleteServiceCompletion {
+    pub completion_id: CompletionId,
+    pub result: CompleteServiceResult,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CompleteServiceResult {
+    Void,
+    Failure(Failure),
+}
+impl_completion_accessors!(CompleteService);
+
+/// Result of a `StartLinkedCommand` — either success (child invocation handle) or failure.
+/// The success variant is populated by `LinkResponse(Ok)` from the child partition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartLinkedCompletion {
+    pub completion_id: CompletionId,
+    pub result: StartLinkedResult,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StartLinkedResult {
+    /// Link established — carries the child workflow's `InvocationId` as the handle.
+    Success(InvocationId),
+    Failure(Failure),
+}
+impl_completion_accessors!(StartLinked);
+
+/// Result of an `UnlinkServiceCommand` — either success (void) or failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlinkServiceCompletion {
+    pub completion_id: CompletionId,
+    pub result: UnlinkServiceResult,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnlinkServiceResult {
+    Void,
+    Failure(Failure),
+}
+impl_completion_accessors!(UnlinkService);
+
+/// Result of an `UnlinkInvocationCommand` — either success (void) or failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlinkInvocationCompletion {
+    pub completion_id: CompletionId,
+    pub result: UnlinkInvocationResult,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnlinkInvocationResult {
+    Void,
+    Failure(Failure),
+}
+impl_completion_accessors!(UnlinkInvocation);
+
+/// Result of an `AttachServiceCommand` — either the child VO's success bytes or a failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachServiceCompletion {
+    pub completion_id: CompletionId,
+    pub result: AttachServiceResult,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttachServiceResult {
+    Success(Bytes),
+    Failure(Failure),
+}
+impl_completion_accessors!(AttachService);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignalResult {

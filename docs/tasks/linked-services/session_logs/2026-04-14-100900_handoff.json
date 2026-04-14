@@ -1,0 +1,100 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-14-100900",
+  "branch_name": "linked-services",
+  "task_name": "linked-services",
+  "session_number": 10,
+  "continuity": {
+    "started": "2026-04-08",
+    "sessions_reviewed": 3,
+    "arc_goal": "Implement complete linked services system across three phases: Phase A (object-to-object linking with completion, onCompleted handlers, GC cascade), Phase A.2 (refactor completion model from LinkedFrom-as-sink to unified response_sinks on both VO and WI; eliminate LinkCompletionSink type), Phase B (workflow invocation linking with InvocationEdges, StartLinkedCommand, coupled link+invocation semantics, InvocationStatus::Completing, and full link matrix: VO↔VO, VO↔WI, WI↔VO, WI↔WI). All phases functionally complete; this session applies naming convention cleanup and prepares for PR."
+  },
+  "progress_update": {
+    "summary": "We completed a naming convention refactor across the entire linked-services codebase, replacing parent/child/local/remote field names with directional link_to/link_from (creating) and linked_to/linked_from (established) semantics. Also created a separate branch (refactor/rpc-response-extraction) for an unrelated RPC response extraction cleanup, and fixed a pre-existing broken commit by adding the missing edge_encoding.rs module.",
+    "goal": "Complete linked services implementation (Phases A, A.2, B) with clean naming, then prepare for PR. All phases functionally complete — remaining work is naming cleanup, full workspace validation, and PR prep.",
+    "accomplished": [
+      "Audited ~350+ runtime guards for impossible states across the codebase (unreachable!, panic!, debug_assert!, bail!) — documented findings in plan file",
+      "Created refactor/rpc-response-extraction branch with centralized RPC response extraction methods on PartitionProcessorRpcResponse — eliminates 9 scattered panic sites and fixes a copy-paste bug in purge_journal",
+      "Renamed all link struct fields: LinkRequest.{link_to,link_from}, LinkResponse.{linked_from,linked_to}, UnlinkRequest.{linked_to,linked_from}, UnlinkResponse.linked_from, LinkCompletionNotification.{linked_from,linked_to}, ServiceLinkNotification.linked_from, InvocationLinkNotification.linked_from",
+      "Renamed retain_non_parent_sinks → retain_non_linked_from_sinks, encode_remote/decode_remote → encode_entity/decode_entity, and all parent_*/child_* local variables to link convention",
+      "Fixed pre-existing broken commit: added missing edge_encoding.rs module with encode_entity/decode_entity functions"
+    ],
+    "now": "All naming convention changes committed (7e5151c3d). 36/36 linked-services tests pass. Two untracked doc files remain (rename_tasks.md, task_context_rename.md).",
+    "next_steps": [
+      "Full workspace validation: cargo nextest run --all-features to catch cross-crate regressions",
+      "Decide commit squash strategy — branch now at 32 commits",
+      "Release notes entry in release-notes/unreleased/ for the linked services feature",
+      "PR prep and review"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Proto field numbers unchanged — wire format backward compatible",
+      "Tense convention: link_to/link_from for creating, linked_to/linked_from for established",
+      "No suffixes on field names — Rust types carry the 'what'",
+      "edge_encoding.rs is a stub implementation — may need verification against original intent",
+      "Phase A behaviors preserved: cycle detection, GC cascade, external state mutation guard, stale edge cleanup, JSON failure encoding in onCompleted handler",
+      "VirtualObjectStatus::Completed is type-enforced terminal (no response_sinks field)",
+      "LinkedFrom edges are presence-only — all callback data lives in target entity's response_sinks",
+      "WI unlinker MUST NOT filter response_sinks (would break WI blocking on attach sink)",
+      "has_links flag on InFlightInvocationMetadata still gates RocksDB scans in end_invocation",
+      "WAL serialization must remain backward compatible (Option<T> defaults to None, Duration fields unwrap_or_default)",
+      "ServiceCompletionTarget carries retention_duration and journal_retention_duration for spawned handlers"
+    ],
+    "decisions": [
+      "Tense encodes link lifecycle stage: link_* = creating, linked_* = established fact",
+      "No suffixes: linked_from: ServiceId not linked_from_service_id — type system provides disambiguation",
+      "decode_edge_key_value returns generic 'entity' not 'linked_to' — the caller's scan context determines semantics",
+      "RPC response extraction refactor split to separate branch (refactor/rpc-response-extraction) since it's unrelated to linking",
+      "Kill/cancel of Completing invocations force-completes using stored result via resume_completing_invocation — children keep running independently but parent is unblocked",
+      "1-hop cycle detection accepted as initial tradeoff — documenting limitation rather than implementing bounded BFS",
+      "Option A: store retention on ServiceCompletionTarget sink rather than threading through send_response_to_sinks at every call site — semantically correct (linker owns retention), eliminates parameter-threading bug class entirely",
+      "CompleteServiceCommand now uses linker's retention (via sink) not completer's — resolves the semantic ambiguity",
+      "Single canonical definition for remote_type in service_edges_table, re-exported by invocation_edges_table",
+      "Unified response sinks on both VO and WI entity types rather than maintaining two dispatch pipes (LinkedFrom-based for VO completion, response_sinks for WI)",
+      "VirtualObjectStatus::Locked/Unlocked gain inline response_sinks as struct variants; Completed has no sinks field (type-enforced terminal state)",
+      "Two link establishment paths: Path A (LinkServiceCommand → LinkRequest round-trip) for existing children; Path B (StartLinkedCommand → ServiceInvocation.link_from piggyback) for new WI children",
+      "Already-completed target short-circuits: on_link_request fires handler immediately with stored result, emits LinkCompletionNotification for edge transition, sends LinkResponse(Ok)",
+      "Option A split for unlink commands: UnlinkServiceCommand (VO target) / UnlinkInvocationCommand (WI target) — type-level split at command layer only",
+      "Two edge tables: ServiceEdges (VO parents, service-level) + InvocationEdges (WI parents, invocation-scoped)",
+      "ServiceEdgeState uses proto oneof to unify edge label + state — no separate edge_label param on put_service_edge",
+      "onCompleted handler encodes failure details as JSON in typed FailurePayload (not format-string) — safe for special characters"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Should the 32 commits on this branch be squashed before PR?",
+      "Does the edge_encoding.rs stub match the original implementation that was in the working tree?",
+      "SDK implementation scope — how many commands does the Rust SDK need to expose?",
+      "Whether WAL format version bump needed for adding Option fields to command payloads",
+      "Does the linked services feature need a release-notes/unreleased/ entry?"
+    ],
+    "risks": [
+      "Full workspace test run not yet executed — potential cross-crate regressions from cumulative refactors",
+      "edge_encoding.rs is a reconstructed stub — encoding format may not match what was originally implemented"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "crates/types/src/invocation/mod.rs",
+      "crates/storage-api/src/protobuf_types.rs",
+      "crates/storage-api/proto/dev/restate/storage/v1/domain.proto",
+      "crates/worker/src/partition/state_machine/mod.rs",
+      "crates/worker/src/partition/state_machine/entries/link_service_command.rs",
+      "crates/worker/src/partition/state_machine/entries/unlink_service_command.rs",
+      "crates/worker/src/partition/state_machine/tests/linked_services.rs",
+      "crates/partition-store/src/edge_encoding.rs",
+      "crates/partition-store/src/service_edges_table/mod.rs",
+      "crates/partition-store/src/invocation_edges_table/mod.rs"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "cargo check -p restate-worker",
+      "cargo nextest run -p restate-worker -- linked_services",
+      "cargo fmt --all",
+      "cargo clippy -p restate-types -p restate-storage-api -p restate-partition-store -- -D warnings"
+    ]
+  },
+  "context": {
+    "wip_state": "clean",
+    "last_commit": "7e5151c3d"
+  }
+}

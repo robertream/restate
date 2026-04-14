@@ -23,14 +23,16 @@ use restate_types::identifiers::{
 use restate_types::invocation::Header;
 use restate_types::journal_v2::encoding::DecodingError;
 use restate_types::journal_v2::lite::{
-    AttachInvocationCommandLite, CallCommandLite, ClearAllStateCommandLite, ClearStateCommandLite,
-    CompleteAwakeableCommandLite, CompleteAwakeableResultLite, CompletePromiseCommandLite,
-    EntryLite, GetEagerStateCommandLite, GetEagerStateKeysCommandLite,
-    GetInvocationOutputCommandLite, GetLazyStateCommandLite, GetLazyStateKeysCommandLite,
-    GetPromiseCommandLite, GetStateResultLite, InputCommandLite, NotificationLite,
+    AttachInvocationCommandLite, AttachServiceCommandLite, CallCommandLite,
+    ClearAllStateCommandLite, ClearStateCommandLite, CompleteAwakeableCommandLite,
+    CompleteAwakeableResultLite, CompletePromiseCommandLite, CompleteServiceCommandLite, EntryLite,
+    GetEagerStateCommandLite, GetEagerStateKeysCommandLite, GetInvocationOutputCommandLite,
+    GetLazyStateCommandLite, GetLazyStateKeysCommandLite, GetPromiseCommandLite,
+    GetStateResultLite, InputCommandLite, LinkServiceCommandLite, NotificationLite,
     NotificationResultLite, OneWayCallCommandLite, OutputCommandLite, OutputResultLite,
     PeekPromiseCommandLite, RunCommandLite, SendSignalCommandLite, SetStateCommandLite,
-    SignalResultLite, SleepCommandLite,
+    SignalResultLite, SleepCommandLite, StartLinkedCommandLite, UnlinkInvocationCommandLite,
+    UnlinkServiceCommandLite,
 };
 use restate_types::journal_v2::raw::{
     CallOrSendMetadata, RawCommand, RawCommandSpecificMetadata, RawEntry, RawNotification,
@@ -607,6 +609,226 @@ impl Encoder for ServiceProtocolV4Codec {
             )
             .into(),
 
+            Entry::Command(Command::LinkService(LinkServiceCommand {
+                link_to,
+                result_completion_handler,
+                link_completion_id,
+                name,
+            })) => RawCommand::new(
+                CommandType::LinkService,
+                proto::LinkServiceCommandMessage {
+                    service_name: link_to.service_name.to_string(),
+                    service_key: link_to.key.to_string(),
+                    completion_handler_name: result_completion_handler.map(|s| s.to_string()),
+                    result_completion_id: link_completion_id,
+                    name: name.to_string(),
+                }
+                .encode_to_vec(),
+            )
+            .into(),
+
+            Entry::Notification(Notification::Completion(Completion::LinkService(
+                LinkServiceCompletion {
+                    completion_id,
+                    result,
+                },
+            ))) => RawNotification::new(
+                CompletionType::LinkService,
+                NotificationId::CompletionId(completion_id),
+                proto::LinkServiceCompletionNotificationMessage {
+                    completion_id,
+                    result: Some(result.into()),
+                }
+                .encode_to_vec(),
+            )
+            .into(),
+
+            Entry::Command(Command::UnlinkService(UnlinkServiceCommand {
+                unlink_from,
+                unlink_completion_id,
+                name,
+            })) => RawCommand::new(
+                CommandType::UnlinkService,
+                proto::UnlinkServiceCommandMessage {
+                    service_name: unlink_from.service_name.to_string(),
+                    service_key: unlink_from.key.to_string(),
+                    result_completion_id: unlink_completion_id,
+                    name: name.to_string(),
+                }
+                .encode_to_vec(),
+            )
+            .into(),
+
+            Entry::Notification(Notification::Completion(Completion::UnlinkService(
+                UnlinkServiceCompletion {
+                    completion_id,
+                    result,
+                },
+            ))) => RawNotification::new(
+                CompletionType::UnlinkService,
+                NotificationId::CompletionId(completion_id),
+                proto::UnlinkServiceCompletionNotificationMessage {
+                    completion_id,
+                    result: Some(result.into()),
+                }
+                .encode_to_vec(),
+            )
+            .into(),
+
+            Entry::Command(Command::UnlinkInvocation(UnlinkInvocationCommand {
+                unlink_from,
+                unlink_completion_id,
+                name,
+            })) => RawCommand::new(
+                CommandType::UnlinkInvocation,
+                proto::UnlinkInvocationCommandMessage {
+                    invocation_id: unlink_from.to_string(),
+                    result_completion_id: unlink_completion_id,
+                    name: name.to_string(),
+                }
+                .encode_to_vec(),
+            )
+            .into(),
+
+            Entry::Notification(Notification::Completion(Completion::UnlinkInvocation(
+                UnlinkInvocationCompletion {
+                    completion_id,
+                    result,
+                },
+            ))) => RawNotification::new(
+                CompletionType::UnlinkInvocation,
+                NotificationId::CompletionId(completion_id),
+                proto::UnlinkInvocationCompletionNotificationMessage {
+                    completion_id,
+                    result: Some(result.into()),
+                }
+                .encode_to_vec(),
+            )
+            .into(),
+
+            Entry::Command(Command::CompleteService(CompleteServiceCommand {
+                result,
+                completion_id,
+                name,
+            })) => RawCommand::new(
+                CommandType::CompleteService,
+                proto::CompleteServiceCommandMessage {
+                    result: Some(result.into()),
+                    result_completion_id: completion_id,
+                    name: name.to_string(),
+                }
+                .encode_to_vec(),
+            )
+            .into(),
+
+            Entry::Notification(Notification::Completion(Completion::CompleteService(
+                CompleteServiceCompletion {
+                    completion_id,
+                    result,
+                },
+            ))) => RawNotification::new(
+                CompletionType::CompleteService,
+                NotificationId::CompletionId(completion_id),
+                proto::CompleteServiceCompletionNotificationMessage {
+                    completion_id,
+                    result: Some(result.into()),
+                }
+                .encode_to_vec(),
+            )
+            .into(),
+
+            Entry::Command(Command::StartLinked(StartLinkedCommand {
+                request:
+                    CallRequest {
+                        invocation_target,
+                        parameter,
+                        headers,
+                        idempotency_key,
+                        invocation_id,
+                        span_context,
+                        completion_retention_duration,
+                        journal_retention_duration,
+                    },
+                result_completion_handler,
+                link_completion_id,
+                name,
+            })) => RawCommand::new(
+                CommandType::StartLinked,
+                proto::StartLinkedCommandMessage {
+                    service_name: invocation_target.service_name().to_string(),
+                    handler_name: invocation_target.handler_name().to_string(),
+                    parameter,
+                    headers: headers.into_iter().map(Into::into).collect(),
+                    key: invocation_target
+                        .key()
+                        .unwrap_or(&ByteString::new())
+                        .to_string(),
+                    idempotency_key: idempotency_key.map(|s| s.to_string()),
+                    completion_handler_name: result_completion_handler.map(|s| s.to_string()),
+                    result_completion_id: link_completion_id,
+                    name: name.to_string(),
+                }
+                .encode_to_vec(),
+            )
+            .with_command_specific_metadata(RawCommandSpecificMetadata::CallOrSend(Box::new(
+                CallOrSendMetadata {
+                    invocation_id,
+                    invocation_target,
+                    span_context,
+                    completion_retention_duration,
+                    journal_retention_duration,
+                },
+            )))
+            .into(),
+
+            Entry::Notification(Notification::Completion(Completion::StartLinked(
+                StartLinkedCompletion {
+                    completion_id,
+                    result,
+                },
+            ))) => RawNotification::new(
+                CompletionType::StartLinked,
+                NotificationId::CompletionId(completion_id),
+                proto::StartLinkedCompletionNotificationMessage {
+                    completion_id,
+                    result: Some(result.into()),
+                }
+                .encode_to_vec(),
+            )
+            .into(),
+
+            Entry::Command(Command::AttachService(AttachServiceCommand {
+                attach_to,
+                completion_id,
+                name,
+            })) => RawCommand::new(
+                CommandType::AttachService,
+                proto::AttachServiceCommandMessage {
+                    service_name: attach_to.service_name.to_string(),
+                    service_key: attach_to.key.to_string(),
+                    result_completion_id: completion_id,
+                    name: name.to_string(),
+                }
+                .encode_to_vec(),
+            )
+            .into(),
+
+            Entry::Notification(Notification::Completion(Completion::AttachService(
+                AttachServiceCompletion {
+                    completion_id,
+                    result,
+                },
+            ))) => RawNotification::new(
+                CompletionType::AttachService,
+                NotificationId::CompletionId(completion_id),
+                proto::AttachServiceCompletionNotificationMessage {
+                    completion_id,
+                    result: Some(result.into()),
+                }
+                .encode_to_vec(),
+            )
+            .into(),
+
             Entry::Notification(Notification::Signal(Signal { id, result })) => {
                 RawNotification::new(
                     NotificationType::Signal,
@@ -966,6 +1188,108 @@ impl Decoder for ServiceProtocolV4Codec {
                     }
                     .into()
                 }
+                CommandType::LinkService => {
+                    let proto::LinkServiceCommandMessage {
+                        service_name,
+                        service_key,
+                        completion_handler_name,
+                        result_completion_id,
+                        name,
+                    } = decode_or_bail!(cmd.serialized_content(), LinkServiceCommandMessage);
+                    LinkServiceCommand {
+                        link_to: ServiceId::new(service_name, service_key),
+                        result_completion_handler: completion_handler_name.map(Into::into),
+                        link_completion_id: result_completion_id,
+                        name: name.into(),
+                    }
+                    .into()
+                }
+                CommandType::UnlinkService => {
+                    let proto::UnlinkServiceCommandMessage {
+                        service_name,
+                        service_key,
+                        result_completion_id,
+                        name,
+                    } = decode_or_bail!(cmd.serialized_content(), UnlinkServiceCommandMessage);
+                    UnlinkServiceCommand {
+                        unlink_from: ServiceId::new(service_name, service_key),
+                        unlink_completion_id: result_completion_id,
+                        name: name.into(),
+                    }
+                    .into()
+                }
+                CommandType::UnlinkInvocation => {
+                    let proto::UnlinkInvocationCommandMessage {
+                        invocation_id,
+                        result_completion_id,
+                        name,
+                    } = decode_or_bail!(cmd.serialized_content(), UnlinkInvocationCommandMessage);
+                    let invocation_id = to_invocation_id_or_bail!(invocation_id);
+                    UnlinkInvocationCommand {
+                        unlink_from: invocation_id,
+                        unlink_completion_id: result_completion_id,
+                        name: name.into(),
+                    }
+                    .into()
+                }
+                CommandType::CompleteService => {
+                    let proto::CompleteServiceCommandMessage {
+                        result,
+                        result_completion_id,
+                        name,
+                    } = decode_or_bail!(cmd.serialized_content(), CompleteServiceCommandMessage);
+                    CompleteServiceCommand {
+                        result: get_or_bail!(result).try_into()?,
+                        completion_id: result_completion_id,
+                        name: name.into(),
+                    }
+                    .into()
+                }
+                CommandType::StartLinked => {
+                    let proto::StartLinkedCommandMessage {
+                        parameter,
+                        headers,
+                        idempotency_key,
+                        completion_handler_name,
+                        result_completion_id,
+                        name,
+                        ..
+                    } = decode_or_bail!(cmd.serialized_content(), StartLinkedCommandMessage);
+                    let_assert!(
+                        RawCommandSpecificMetadata::CallOrSend(metadata) =
+                            cmd.command_specific_metadata()
+                    );
+                    StartLinkedCommand {
+                        request: CallRequest {
+                            invocation_id: metadata.invocation_id,
+                            invocation_target: metadata.invocation_target.clone(),
+                            span_context: metadata.span_context.clone(),
+                            parameter,
+                            headers: headers.into_iter().map(Into::into).collect(),
+                            idempotency_key: idempotency_key.map(|s| s.into()),
+                            completion_retention_duration: metadata.completion_retention_duration,
+                            journal_retention_duration: metadata.journal_retention_duration,
+                        },
+                        result_completion_handler: completion_handler_name.map(Into::into),
+                        link_completion_id: result_completion_id,
+                        name: name.into(),
+                    }
+                    .into()
+                }
+                CommandType::AttachService => {
+                    let proto::AttachServiceCommandMessage {
+                        service_name,
+                        service_key,
+                        result_completion_id,
+                        name,
+                    } = decode_or_bail!(cmd.serialized_content(), AttachServiceCommandMessage);
+                    AttachServiceCommand {
+                        attach_to: ServiceId::new(service_name, service_key),
+                        completion_id: result_completion_id,
+                        name: name.into(),
+                    }
+                    .into()
+                }
             },
 
             RawEntry::Notification(notif) => match notif.ty() {
@@ -1120,6 +1444,90 @@ impl Decoder for ServiceProtocolV4Codec {
                         GetInvocationOutputCompletionNotificationMessage
                     );
                     GetInvocationOutputCompletion {
+                        completion_id,
+                        result: get_or_bail!(result).try_into()?,
+                    }
+                    .into()
+                }
+                NotificationType::Completion(CompletionType::LinkService) => {
+                    let proto::LinkServiceCompletionNotificationMessage {
+                        completion_id,
+                        result,
+                    } = decode_or_bail!(
+                        notif.serialized_content(),
+                        LinkServiceCompletionNotificationMessage
+                    );
+                    LinkServiceCompletion {
+                        completion_id,
+                        result: get_or_bail!(result).try_into()?,
+                    }
+                    .into()
+                }
+                NotificationType::Completion(CompletionType::CompleteService) => {
+                    let proto::CompleteServiceCompletionNotificationMessage {
+                        completion_id,
+                        result,
+                    } = decode_or_bail!(
+                        notif.serialized_content(),
+                        CompleteServiceCompletionNotificationMessage
+                    );
+                    CompleteServiceCompletion {
+                        completion_id,
+                        result: get_or_bail!(result).try_into()?,
+                    }
+                    .into()
+                }
+                NotificationType::Completion(CompletionType::StartLinked) => {
+                    let proto::StartLinkedCompletionNotificationMessage {
+                        completion_id,
+                        result,
+                    } = decode_or_bail!(
+                        notif.serialized_content(),
+                        StartLinkedCompletionNotificationMessage
+                    );
+                    StartLinkedCompletion {
+                        completion_id,
+                        result: get_or_bail!(result).try_into()?,
+                    }
+                    .into()
+                }
+                NotificationType::Completion(CompletionType::UnlinkService) => {
+                    let proto::UnlinkServiceCompletionNotificationMessage {
+                        completion_id,
+                        result,
+                    } = decode_or_bail!(
+                        notif.serialized_content(),
+                        UnlinkServiceCompletionNotificationMessage
+                    );
+                    UnlinkServiceCompletion {
+                        completion_id,
+                        result: get_or_bail!(result).try_into()?,
+                    }
+                    .into()
+                }
+                NotificationType::Completion(CompletionType::UnlinkInvocation) => {
+                    let proto::UnlinkInvocationCompletionNotificationMessage {
+                        completion_id,
+                        result,
+                    } = decode_or_bail!(
+                        notif.serialized_content(),
+                        UnlinkInvocationCompletionNotificationMessage
+                    );
+                    UnlinkInvocationCompletion {
+                        completion_id,
+                        result: get_or_bail!(result).try_into()?,
+                    }
+                    .into()
+                }
+                NotificationType::Completion(CompletionType::AttachService) => {
+                    let proto::AttachServiceCompletionNotificationMessage {
+                        completion_id,
+                        result,
+                    } = decode_or_bail!(
+                        notif.serialized_content(),
+                        AttachServiceCompletionNotificationMessage
+                    );
+                    AttachServiceCompletion {
                         completion_id,
                         result: get_or_bail!(result).try_into()?,
                     }
@@ -1368,6 +1776,66 @@ impl Decoder for ServiceProtocolV4Codec {
                                 CompleteAwakeableResultLite::Failure
                             }
                         },
+                    }
+                    .into()
+                }
+                CommandType::LinkService => {
+                    let proto::LinkServiceCommandMessage {
+                        result_completion_id,
+                        ..
+                    } = decode_or_bail!(cmd.serialized_content(), LinkServiceCommandMessage);
+                    LinkServiceCommandLite {
+                        completion_id: result_completion_id,
+                    }
+                    .into()
+                }
+                CommandType::UnlinkService => {
+                    let proto::UnlinkServiceCommandMessage {
+                        result_completion_id,
+                        ..
+                    } = decode_or_bail!(cmd.serialized_content(), UnlinkServiceCommandMessage);
+                    UnlinkServiceCommandLite {
+                        completion_id: result_completion_id,
+                    }
+                    .into()
+                }
+                CommandType::UnlinkInvocation => {
+                    let proto::UnlinkInvocationCommandMessage {
+                        result_completion_id,
+                        ..
+                    } = decode_or_bail!(cmd.serialized_content(), UnlinkInvocationCommandMessage);
+                    UnlinkInvocationCommandLite {
+                        completion_id: result_completion_id,
+                    }
+                    .into()
+                }
+                CommandType::CompleteService => {
+                    let proto::CompleteServiceCommandMessage {
+                        result_completion_id,
+                        ..
+                    } = decode_or_bail!(cmd.serialized_content(), CompleteServiceCommandMessage);
+                    CompleteServiceCommandLite {
+                        completion_id: result_completion_id,
+                    }
+                    .into()
+                }
+                CommandType::StartLinked => {
+                    let proto::StartLinkedCommandMessage {
+                        result_completion_id,
+                        ..
+                    } = decode_or_bail!(cmd.serialized_content(), StartLinkedCommandMessage);
+                    StartLinkedCommandLite {
+                        completion_id: result_completion_id,
+                    }
+                    .into()
+                }
+                CommandType::AttachService => {
+                    let proto::AttachServiceCommandMessage {
+                        result_completion_id,
+                        ..
+                    } = decode_or_bail!(cmd.serialized_content(), AttachServiceCommandMessage);
+                    AttachServiceCommandLite {
+                        completion_id: result_completion_id,
                     }
                     .into()
                 }
@@ -2016,5 +2484,231 @@ impl From<proto::ErrorMessage> for InvocationError {
         } else {
             InvocationError::new(value.code, value.message).with_stacktrace(value.stacktrace)
         }
+    }
+}
+
+// --- LinkService conversions ---
+
+impl From<LinkServiceResult> for proto::link_service_completion_notification_message::Result {
+    fn from(value: LinkServiceResult) -> Self {
+        match value {
+            LinkServiceResult::Success(service_id) => {
+                Self::ServiceId(format!("{}/{}", service_id.service_name, service_id.key))
+            }
+            LinkServiceResult::Failure(f) => Self::Failure(f.into()),
+        }
+    }
+}
+
+impl TryFrom<proto::link_service_completion_notification_message::Result> for LinkServiceResult {
+    type Error = DecodingError;
+
+    fn try_from(
+        value: proto::link_service_completion_notification_message::Result,
+    ) -> Result<Self, Self::Error> {
+        Ok(match value {
+            proto::link_service_completion_notification_message::Result::ServiceId(s) => {
+                let (name, key) = s.split_once('/').ok_or_else(|| {
+                    DecodingError::from(GenericError::from(BadFieldError(
+                        "service_id",
+                        format!("invalid service_id format: {s}").into(),
+                    )))
+                })?;
+                Self::Success(ServiceId::new(name, key))
+            }
+            proto::link_service_completion_notification_message::Result::Failure(f) => {
+                Self::Failure(f.into())
+            }
+        })
+    }
+}
+
+// --- CompleteService conversions ---
+
+impl From<restate_types::invocation::ResponseResult>
+    for proto::complete_service_command_message::Result
+{
+    fn from(value: restate_types::invocation::ResponseResult) -> Self {
+        match value {
+            restate_types::invocation::ResponseResult::Success(v) => {
+                Self::Value(proto::Value { content: v })
+            }
+            restate_types::invocation::ResponseResult::Failure(f) => {
+                Self::Failure(proto::Failure {
+                    code: f.code().into(),
+                    message: f.message().to_string(),
+                    ..Default::default()
+                })
+            }
+        }
+    }
+}
+
+impl TryFrom<proto::complete_service_command_message::Result>
+    for restate_types::invocation::ResponseResult
+{
+    type Error = DecodingError;
+
+    fn try_from(
+        value: proto::complete_service_command_message::Result,
+    ) -> Result<Self, Self::Error> {
+        Ok(match value {
+            proto::complete_service_command_message::Result::Value(v) => Self::Success(v.content),
+            proto::complete_service_command_message::Result::Failure(f) => {
+                Self::Failure(InvocationError::new(f.code, f.message))
+            }
+        })
+    }
+}
+
+impl From<CompleteServiceResult>
+    for proto::complete_service_completion_notification_message::Result
+{
+    fn from(value: CompleteServiceResult) -> Self {
+        match value {
+            CompleteServiceResult::Void => Self::Void(proto::Void::default()),
+            CompleteServiceResult::Failure(f) => Self::Failure(f.into()),
+        }
+    }
+}
+
+impl TryFrom<proto::complete_service_completion_notification_message::Result>
+    for CompleteServiceResult
+{
+    type Error = DecodingError;
+
+    fn try_from(
+        value: proto::complete_service_completion_notification_message::Result,
+    ) -> Result<Self, Self::Error> {
+        Ok(match value {
+            proto::complete_service_completion_notification_message::Result::Void(_) => Self::Void,
+            proto::complete_service_completion_notification_message::Result::Failure(f) => {
+                Self::Failure(f.into())
+            }
+        })
+    }
+}
+
+// --- StartLinked conversions ---
+
+impl From<StartLinkedResult> for proto::start_linked_completion_notification_message::Result {
+    fn from(value: StartLinkedResult) -> Self {
+        match value {
+            StartLinkedResult::Success(invocation_id) => {
+                Self::InvocationId(invocation_id.to_string())
+            }
+            StartLinkedResult::Failure(f) => Self::Failure(f.into()),
+        }
+    }
+}
+
+impl TryFrom<proto::start_linked_completion_notification_message::Result> for StartLinkedResult {
+    type Error = DecodingError;
+
+    fn try_from(
+        value: proto::start_linked_completion_notification_message::Result,
+    ) -> Result<Self, Self::Error> {
+        Ok(match value {
+            proto::start_linked_completion_notification_message::Result::InvocationId(s) => {
+                let iid = InvocationId::from_str(&s).map_err(|e| {
+                    DecodingError::from(GenericError::from(BadFieldError(
+                        "invocation_id",
+                        e.into(),
+                    )))
+                })?;
+                Self::Success(iid)
+            }
+            proto::start_linked_completion_notification_message::Result::Failure(f) => {
+                Self::Failure(f.into())
+            }
+        })
+    }
+}
+
+// --- UnlinkService conversions ---
+
+impl From<UnlinkServiceResult> for proto::unlink_service_completion_notification_message::Result {
+    fn from(value: UnlinkServiceResult) -> Self {
+        match value {
+            UnlinkServiceResult::Void => Self::Void(proto::Void::default()),
+            UnlinkServiceResult::Failure(f) => Self::Failure(f.into()),
+        }
+    }
+}
+
+impl TryFrom<proto::unlink_service_completion_notification_message::Result>
+    for UnlinkServiceResult
+{
+    type Error = DecodingError;
+
+    fn try_from(
+        value: proto::unlink_service_completion_notification_message::Result,
+    ) -> Result<Self, Self::Error> {
+        Ok(match value {
+            proto::unlink_service_completion_notification_message::Result::Void(_) => Self::Void,
+            proto::unlink_service_completion_notification_message::Result::Failure(f) => {
+                Self::Failure(f.into())
+            }
+        })
+    }
+}
+
+// --- UnlinkInvocation conversions ---
+
+impl From<UnlinkInvocationResult>
+    for proto::unlink_invocation_completion_notification_message::Result
+{
+    fn from(value: UnlinkInvocationResult) -> Self {
+        match value {
+            UnlinkInvocationResult::Void => Self::Void(proto::Void::default()),
+            UnlinkInvocationResult::Failure(f) => Self::Failure(f.into()),
+        }
+    }
+}
+
+impl TryFrom<proto::unlink_invocation_completion_notification_message::Result>
+    for UnlinkInvocationResult
+{
+    type Error = DecodingError;
+
+    fn try_from(
+        value: proto::unlink_invocation_completion_notification_message::Result,
+    ) -> Result<Self, Self::Error> {
+        Ok(match value {
+            proto::unlink_invocation_completion_notification_message::Result::Void(_) => Self::Void,
+            proto::unlink_invocation_completion_notification_message::Result::Failure(f) => {
+                Self::Failure(f.into())
+            }
+        })
+    }
+}
+
+// --- AttachService conversions ---
+
+impl From<AttachServiceResult> for proto::attach_service_completion_notification_message::Result {
+    fn from(value: AttachServiceResult) -> Self {
+        match value {
+            AttachServiceResult::Success(bytes) => Self::Value(proto::Value { content: bytes }),
+            AttachServiceResult::Failure(f) => Self::Failure(f.into()),
+        }
+    }
+}
+
+impl TryFrom<proto::attach_service_completion_notification_message::Result>
+    for AttachServiceResult
+{
+    type Error = DecodingError;
+
+    fn try_from(
+        value: proto::attach_service_completion_notification_message::Result,
+    ) -> Result<Self, Self::Error> {
+        Ok(match value {
+            proto::attach_service_completion_notification_message::Result::Value(v) => {
+                Self::Success(v.content)
+            }
+            proto::attach_service_completion_notification_message::Result::Failure(f) => {
+                Self::Failure(f.into())
+            }
+        })
     }
 }

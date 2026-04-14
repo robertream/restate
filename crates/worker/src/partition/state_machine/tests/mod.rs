@@ -16,6 +16,7 @@ mod delayed_send;
 pub mod fixtures;
 mod idempotency;
 mod kill_cancel;
+mod linked_services;
 pub mod matchers;
 mod workflow;
 
@@ -343,7 +344,7 @@ async fn shared_invocation_skips_inbox() -> TestResult {
     let mut tx = test_env.storage.transaction();
     tx.put_virtual_object_status(
         &invocation_target.as_keyed_service_id().unwrap(),
-        &VirtualObjectStatus::Locked(InvocationId::mock_random()),
+        &VirtualObjectStatus::locked(InvocationId::mock_random()),
     )?;
     tx.commit().await.unwrap();
     drop(tx);
@@ -1139,7 +1140,7 @@ async fn consecutive_exclusive_handler_invocations_will_use_inbox() -> TestResul
             .storage
             .get_virtual_object_status(&keyed_service_id)
             .await,
-        ok(eq(VirtualObjectStatus::Locked(first_invocation_id)))
+        ok(eq(VirtualObjectStatus::locked(first_invocation_id)))
     );
 
     // Let's start the second invocation
@@ -1175,7 +1176,7 @@ async fn consecutive_exclusive_handler_invocations_will_use_inbox() -> TestResul
             .storage
             .get_virtual_object_status(&keyed_service_id)
             .await,
-        ok(eq(VirtualObjectStatus::Locked(first_invocation_id)))
+        ok(eq(VirtualObjectStatus::locked(first_invocation_id)))
     );
 
     // Send the End Effect to terminate the first invocation
@@ -1195,7 +1196,7 @@ async fn consecutive_exclusive_handler_invocations_will_use_inbox() -> TestResul
             .storage
             .get_virtual_object_status(&keyed_service_id)
             .await,
-        ok(eq(VirtualObjectStatus::Locked(second_invocation_id)))
+        ok(eq(VirtualObjectStatus::locked(second_invocation_id)))
     );
 
     let _ = test_env
@@ -1220,7 +1221,7 @@ async fn consecutive_exclusive_handler_invocations_will_use_inbox() -> TestResul
             .storage
             .get_virtual_object_status(&keyed_service_id)
             .await,
-        ok(eq(VirtualObjectStatus::Unlocked))
+        ok(eq(VirtualObjectStatus::unlocked()))
     );
 
     test_env.shutdown().await;

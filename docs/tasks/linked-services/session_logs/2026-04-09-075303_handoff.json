@@ -1,0 +1,73 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-09-075303",
+  "branch_name": "linked-services",
+  "task_name": "linked-services",
+  "session_number": 2,
+  "continuity": {
+    "started": "2026-04-08",
+    "sessions_reviewed": 1,
+    "arc_goal": "Design and implement linked services Phase A: object-to-object linking with completion, onCompleted handlers, GC cascade, and state/invocation rejection on completed objects."
+  },
+  "progress_update": {
+    "summary": "Continued the linked-services design session. Reviewed the design doc, addressed all plan review findings (Completed+Locked conflict, cycle detection, proto type IDs, LinkedFrom value spec, invocation rejection on completed objects). Added UnlinkServiceCommand with full message flow diagrams. Discussed separation of ServiceCompletionNotification (graph management) vs InvocationResponse (result delivery) as orthogonal concerns. Created implementation task breakdown for Phase A with vertical command slices, then reviewed and simplified: merged phases, consolidated tests, fixed false dependencies. Ready for implementation.",
+    "goal": "Design and implement linked services Phase A: object-to-object linking with completion, onCompleted handlers, GC cascade, and state/invocation rejection on completed objects.",
+    "accomplished": [
+      "Addressed all plan review items: Completed+Locked conflict (completed objects reject new invocations), cycle detection (direct only via point read), proto type IDs assigned (0x0415-0x0417), LinkedFrom value specified as empty/presence-only",
+      "Added UnlinkServiceCommand with full unlink flow: ApplyUnlinkServiceCommand → UnlinkServiceRequest → on_unlink_service_request with GC cascade diagram",
+      "Clarified ServiceCompletionNotification vs InvocationResponse as orthogonal (graph management vs result delivery), both sent for workflow invocation parents in Phase B",
+      "Created implementation task breakdown: 4 phases, 9 parent tasks, 15 sub-tasks with vertical command slices",
+      "Reviewed and simplified tasks: merged proto/codec/outbox into vertical slices per command, merged state/invocation rejection test into completion test, extended GC cascade test with grandchild"
+    ],
+    "now": "Task breakdown complete and reviewed at docs/tasks/linked-services/specs/tasks.md. Design doc committed. Ready to begin implementation Wave 1 (storage foundation).",
+    "next_steps": [
+      "Commit task breakdown",
+      "Begin Wave 1 implementation: ServiceEdges table (KeyKind, key schema, traits, RocksDB impl), NodeId type (Object variant only), VirtualObjectStatus::Completed",
+      "Wave 2: Three vertical command slices (LinkService, CompleteService, UnlinkService) — each covers journal type + proto + codec + outbox + WAL dispatch",
+      "Wave 3: State machine handlers (link establishment, completion + rejection, unlink + GC cascade)"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "All tables are logical (2-byte KeyKind prefix) within one RocksDB CF per partition",
+      "NodeId enum with Object variant only for Phase A — WorkflowInvocation added in Phase B",
+      "Direct cycle detection only (point read on LinkedFrom) — transitive cycles deferred",
+      "Completed objects reject new invocations at inbox AND state mutations from in-flight handlers",
+      "ServiceCompletionNotification and InvocationResponse are orthogonal — both sent for workflow invocation parents in Phase B",
+      "Proto type IDs: LinkService=0x0415/0x8015, CompleteService=0x0416/0x8016, UnlinkService=0x0417",
+      "LinkedFrom edges are presence-only (empty value)"
+    ],
+    "decisions": [
+      "Unlink (not RemoveLink) as the verb for edge removal — UnlinkServiceCommand, UnlinkServiceRequest, ctx.unlink()",
+      "VirtualObjectStatus: Unlocked | Locked(InvocationId) | Completed(ResponseResult) — mutually exclusive, Completed is terminal",
+      "Vertical command slices for implementation — each command task covers its full stack (journal + proto + codec + outbox + WAL) rather than splitting by layer",
+      "EdgeState on LinkedTo: Active { completion_handler_name } | Completed — handler name consumed on completion, drops out",
+      "GC cascade: no parents + Completed → delete state/promises/status/edges + propagate UnlinkServiceRequest to children",
+      "Phase A ships independently from Phase B (invocation linking) — Phase A anchors only objects, Phase B adds WorkflowInvocation nodes"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "handle.getOutput() for objects — how does a workflow await an object's completion result? Likely via AttachInvocation-like mechanism",
+      "Batch GC optimization — batching UnlinkServiceRequest per destination partition (separate issue)"
+    ],
+    "risks": []
+  },
+  "working_set": {
+    "key_files": [
+      "docs/design/linked_services.md",
+      "docs/tasks/linked-services/specs/tasks.md",
+      "crates/storage-api/src/service_status_table/mod.rs",
+      "crates/storage-api/src/outbox_table/mod.rs",
+      "crates/partition-store/src/partition_store.rs",
+      "crates/partition-store/src/keys.rs",
+      "crates/types/src/journal_v2/command.rs",
+      "crates/service-protocol-v4/src/message_codec/mod.rs",
+      "service-protocol/dev/restate/service/protocol.proto"
+    ],
+    "active_ids": [],
+    "recent_commands": []
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "9b8ef9e85"
+  }
+}

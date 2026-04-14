@@ -39,7 +39,33 @@ where
         invocation_query: InvocationQuery,
     ) -> Result<PartitionProcessorRpcResponse, StorageError> {
         // We can handle this immediately by querying the partition store, no need to go through proposals
-        let invocation_id = invocation_query.to_invocation_id();
+        let invocation_id = match invocation_query {
+            InvocationQuery::Invocation(iid) => iid,
+            ref q @ InvocationQuery::Workflow(ref sid) => {
+                // TODO We need this query for backward compatibility, remove when we remove the idempotency table
+                match self.storage.get_virtual_object_status(sid).await? {
+                    VirtualObjectStatus::Locked {
+                        invocation_id: iid, ..
+                    } => iid,
+                    VirtualObjectStatus::Unlocked { .. }
+                    | VirtualObjectStatus::Completed { .. } => {
+                        // Try the deterministic id
+                        q.to_invocation_id()
+                    }
+                }
+            }
+            ref q @ InvocationQuery::IdempotencyId(ref iid) => {
+                // TODO We need this query for backward compatibility, remove when we remove the idempotency table
+                match self.storage.get_idempotency_metadata(iid).await? {
+                    Some(idempotency_metadata) => idempotency_metadata.invocation_id,
+                    None => {
+                        // Try the deterministic id
+                        q.to_invocation_id()
+                    }
+                }
+            }
+        };
+
         let invocation_status = self.storage.get_invocation_status(&invocation_id).await?;
 
         match invocation_status {

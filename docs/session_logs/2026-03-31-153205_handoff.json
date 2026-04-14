@@ -1,0 +1,74 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-03-31-153205",
+  "branch_name": "service-macro",
+  "task_name": "service-macro",
+  "session_number": 7,
+  "progress_update": {
+    "summary": "Massive design session. Squashed 42 commits into 1 on live-state-poc branch. Spent the bulk of the session developing the execution model and state graph RFC through iterative design and critique. Refined workflow state semantics (freezes on completion, result is separate return value), link primitives (status window, collections by service type, shared ownership, completion handlers, cascading GC), and workflow graph retention as a data product. Split the original RFC into three focused documents. Cleaned up the docs directory from spectre-generated task structure into a clean layout: docs/rfcs/, docs/design/, docs/plans/, docs/session_logs/.",
+    "goal": "Design the state graph and links model for Restate — making relationships between entities explicit, workflow progress observable, and computation graphs retainable as data products for learning, analytics, visualization, and reporting.",
+    "accomplished": [
+      "Squashed 42 commits into 1, validated (fmt/clippy/nextest pass), pushed to live-state-poc branch",
+      "Developed complete execution model: three tiers (handlers/workflows/objects), durability semantics, mutability contracts, persistence boundary via links, results as immutable facts",
+      "Designed link semantics: status window (running/success/failed + result), collections per service type, shared ownership (ref-counted GC), completion handlers, graph curation before return",
+      "Split into 3 RFCs: State Graph & Links (focused, active), Channels (placeholder), Future Design Ideas (parked supervision/backpressure/reactive edges/aggregation)",
+      "Reorganized docs/ from spectre task structure to clean layout: rfcs/, design/, plans/, session_logs/"
+    ],
+    "now": "Just completed docs directory reorganization. All files moved to new structure. Ready for next session to either ship the SSE POC or begin implementing link storage.",
+    "next_steps": [
+      "Ship SSE POC independently — it's built, tested, and working",
+      "Implement ctx.emit() + invocation introspection endpoint",
+      "Implement onUpgrade state migration",
+      "Begin link storage design (intra-partition first)"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Cross-partition links deferred — start intra-partition",
+      "Channels design deferred until state graph is proven",
+      "Don't let RFC work block shipping the SSE POC"
+    ],
+    "decisions": [
+      "Workflow state freezes on completion (both success and failure). Result is a separate return value, same mechanism as today.",
+      "Links provide status window: running/success/failed + result. Completion handlers optional for flow control. Objects don't need plumbing handlers.",
+      "Workflow graph retained via link is a first-class data product (learning, analytics, visualization, reporting) — separate from the result value.",
+      "Multiple objects can link to same entity — shared ownership, ref-counted GC. Spawner not special.",
+      "Docs reorganized: docs/rfcs/ (proposals), docs/design/ (concepts/future), docs/plans/ (implementation), docs/session_logs/ (handoffs), docs/dev/ (existing)"
+    ],
+    "open_questions": [
+      "Link storage: same column family as state or separate?",
+      "How is link status updated when linked workflow completes?",
+      "Ego graph SSE depth limits and label filtering?",
+      "Graph curation timing: what if workflow crashes before curating?"
+    ],
+    "risks": [
+      "The execution model documentation is the most important session output but lives on a feature branch",
+      "Vision is far from implementation — need to stay grounded in shipping the SSE POC first"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/rfcs/rfc_state_graph_and_links_033126.md",
+      "docs/rfcs/rfc_channels_033126.md",
+      "docs/design/future_design_ideas_033126.md",
+      "crates/ingress-http/src/state_router.rs",
+      "crates/ingress-http/src/handler/objects.rs",
+      "release-notes/unreleased/virtual-object-state-sse.md"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "cargo fmt --all -- --check",
+      "cargo clippy --all-targets --workspace -- -D warnings",
+      "cargo nextest run",
+      "git push -u origin live-state-poc"
+    ]
+  },
+  "continuity": {
+    "started": "2026-03-19",
+    "sessions_reviewed": 6,
+    "arc_goal": "Sessions 1-3 built SSE infrastructure (StateRouter, repartition, state change detection). Session 4 pivoted to vision (OTP comparison, original RFC). Session 5 critiqued and refined (edges vs channels, taxonomy). Session 6 deepened execution model (workflow state lifecycle, link semantics, graph curation, shared ownership), separated RFCs. Session 7 (this) completed the State Graph RFC, reorganized docs. Design is grounded in concrete semantics. Ready to ship SSE POC and begin implementation."
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "b1766c03b"
+  }
+}

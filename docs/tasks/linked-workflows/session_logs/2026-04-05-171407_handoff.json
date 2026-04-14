@@ -1,0 +1,94 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-05-171407",
+  "branch_name": "linked-workflows",
+  "task_name": "linked-workflows",
+  "session_number": 9,
+  "continuity": {
+    "started": "2026-04-02",
+    "sessions_reviewed": 4,
+    "arc_goal": "Implement linked workflows with complete lifecycle management: MVP (create/complete/cancel/remove), Link GC (bidirectional records, purge guard, cross-partition cleanup), and VO onCompleted handler registration. Ship server-side runtime complete with handler callbacks on child completion."
+  },
+  "progress_update": {
+    "summary": "We designed and spec'd the onCompleted handler registration feature for virtual objects. This allows VOs to register a named Exclusive handler at link creation time that fires when the linked child completes. We went through a thorough interview process, wrote a complete spec, ran two rounds of plan review, and resolved all issues. The spec is ready for implementation.",
+    "goal": "Implement VO onCompleted handler registration — allowing virtual objects to react to linked child workflow completion via named handler callbacks registered at link creation time. Complete runtime support from link creation through child completion and handler invocation.",
+    "accomplished": [
+      "Conducted detailed interview covering mechanism, timing, scope, arguments, error handling, mutability, storage, observability",
+      "Wrote complete spec at docs/design/vo_child_link_on_completed.md",
+      "Ran two rounds of plan review — resolved all HIGH/MEDIUM/LOW issues",
+      "Designed type refactoring: EdgeLabel+LinkState → LinkRelation+ChildStatus with complete() transition method",
+      "Resolved failure argument inconsistency: proto-encoded Failure bytes using existing Value/Failure pattern, applied consistently to both HandlerInvocation sink and onCompleted",
+      "Added ServiceInvocation::internal_handler_invocation factory method to spec",
+      "Confirmed encode_handler_argument implementation path: InvocationError → journal_v2::Failure → proto::Failure → encode_to_vec()"
+    ],
+    "now": "Spec is finalized at docs/design/vo_child_link_on_completed.md. All plan review issues resolved. Ready to begin implementation.",
+    "next_steps": [
+      "Implement type refactoring: LinkRelation + ChildStatus replacing EdgeLabel + LinkState",
+      "Update proto (domain.proto Link restructure + LinkCommandMessage completion_handler_name field)",
+      "Implement handler invocation from on_link_completion_notification",
+      "Update HandlerInvocation sink for consistent failure encoding",
+      "Write TDD tests: happy path (child completes → handler fires) + unhappy path (child canceled → Failure argument)"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "VO parents only (SDK controls, no server-side validation)",
+      "Children can be VOs or workflows",
+      "Handler name stored in ChildStatus::Running on ParentOf record — consumed at Running→Completed transition",
+      "No changes to response sinks, outbox messages, or completion fan-out path",
+      "RemoveLink: deleting ParentOf is sufficient — stale LinkCompletionNotification handling covers cleanup",
+      "encode_handler_argument uses two-step chain through journal_v2::Failure → proto::Failure",
+      "Handler invocation is fire-and-forget with normal retry semantics",
+      "Only workflows can enter Completing — VOs complete immediately regardless of links",
+      "Links keyed by (local_service_id, remote_service_id, edge_label) with edge_label in key",
+      "Cross-partition links from day one — all link operations use outbox messages",
+      "Restart-as-new disallowed on linked workflows"
+    ],
+    "decisions": [
+      "No new LinkedCompletionResult proto wrapper — reuse existing Value/Failure pattern",
+      "No server-side parent scope validation — SDK controls API surface",
+      "ChildStatus::complete() method handles Running→Completed transition and extracts handler name atomically",
+      "EdgeLabel::ParentOf/ChildOf enum with local_service_id/remote_service_id naming",
+      "are_linked(a, b) checks both directions — used for cycle prevention in CreateLink",
+      "VO clear state preserves ChildOf records — only deletes outgoing ParentOf links and notifies children",
+      "Removed label field entirely — links identified by child_service_id, not arbitrary label string",
+      "Extracted cancel_linked_children helper used by cancel (Invoked/Suspended/Paused + Completing) and kill (Completing)",
+      "Link barrier check moved outside sinks/retention guard — workflows always enter Completing with running links",
+      "No active_children_count — query link table for Running links instead of maintaining denormalized counter",
+      "Completion delivers Result<T, E> only — no status field, no inline frozen graph",
+      "Completing variant carries InFlightInvocationMetadata + buffered ResponseResult",
+      "RemoveLink included in MVP — graph curation is load-bearing",
+      "End-to-end integration test included in MVP scope",
+      "Cancellation is local per node — each node cancels its own direct children",
+      "HandlerInvocation targets VirtualObjectHandlerType::Exclusive — handler runs under object's exclusive lock",
+      "CreateLink proto uses result_completion_id field (not RawCommand metadata) matching AttachInvocation pattern",
+      "Lite decoding for CreateLink/RemoveLink returns graceful DecodingError — DataFusion skips these entries"
+    ],
+    "blockers": [],
+    "open_questions": [],
+    "risks": [
+      "Updating HandlerInvocation sink (Section 5) may require adjusting existing handler_invocation_sink_queues_callback_on_child_completion test"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/design/vo_child_link_on_completed.md",
+      "crates/storage-api/src/link_table/mod.rs",
+      "crates/storage-api/proto/dev/restate/storage/v1/domain.proto",
+      "crates/types/src/journal_v2/command.rs",
+      "crates/types/src/invocation/mod.rs",
+      "crates/worker/src/partition/state_machine/mod.rs",
+      "crates/worker/src/partition/state_machine/entries/link_command.rs",
+      "crates/service-protocol-v4/src/entry_codec.rs",
+      "crates/worker/src/partition/state_machine/tests/linked_workflows.rs",
+      "crates/partition-store/src/link_table/mod.rs",
+      "crates/storage-api/src/protobuf_types.rs",
+      "service-protocol/dev/restate/service/protocol.proto"
+    ],
+    "active_ids": [],
+    "recent_commands": []
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "861decceb"
+  }
+}

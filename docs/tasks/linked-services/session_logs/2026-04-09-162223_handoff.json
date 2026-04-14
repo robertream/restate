@@ -1,0 +1,104 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-09-162223",
+  "branch_name": "linked-services",
+  "task_name": "linked-services",
+  "session_number": 6,
+  "continuity": {
+    "started": "2026-04-08",
+    "sessions_reviewed": 3,
+    "arc_goal": "Implement complete linked services system: Phase A (object-to-object linking with completion and handlers), Phase A.2 (refactor completion model to LinkedFrom sinks), Phase B (workflow invocation linking with InvocationEdges and coupled semantics)."
+  },
+  "progress_update": {
+    "summary": "Designed Phase A.2 (link completion model refactor + AttachLinkCommand) and Phase B (workflow invocation linking) through extensive design discussion. Produced two approved implementation plans and a combined 25-subtask breakdown. Key design innovations: LinkedFrom records as completion sinks, unified LinkCompletionNotification with source/result/sink fields, two edge tables (ServiceEdges for VO parents, InvocationEdges for WI parents), and LinkCompletionSink enum differentiating Service vs Invocation dispatch.",
+    "goal": "Implement complete linked services: Phase A (object linking, done), Phase A.2 (refactor completion model to LinkedFrom sinks, add AttachLinkCommand), Phase B (workflow invocation linking with InvocationEdges, StartLinkedCommand, coupled semantics).",
+    "accomplished": [
+      "Designed and approved Phase A.2 plan: EntityId rename, LinkedFrom-as-sink model, LinkCompletionSink/LinkCompletionNotification, AttachLinkCommand, CompleteServiceCommand guard",
+      "Designed and approved Phase B plan: InvocationEdges table, StartLinkedCommand with Link response sink, WI child completion path, InvocationStatus::Completing",
+      "Resolved key design decisions through iterative discussion: coupled link+invocation semantics, LinkCompletionSink enum (Service/Invocation), LinkCompletionNotification { source, result, sink } unified message",
+      "Generated combined task breakdown: 7 phases, 12 parent tasks, 25 sub-tasks with dependency analysis and parallel execution waves",
+      "Established full link matrix: VO→VO (Phase A, complete), VO→WI, WI→VO, WI→WI (Phase B)"
+    ],
+    "now": "Task breakdown complete and saved. Plans approved. Ready for implementation execution starting with Phase A.2 Wave 1 (EntityId rename + type definitions).",
+    "next_steps": [
+      "Execute Phase A.2 starting with task 1.1: rename ServiceNodeId → EntityId, replace LinkServiceResponse → LinkResponse, define LinkCompletionSink + LinkCompletionNotification types",
+      "Wave 2: refactor ServiceEdgeState (LinkedTo simplified, LinkedFrom as sink) + start InvocationEdges table in parallel",
+      "Wave 3: LinkCompletionNotification path + CompleteServiceCommand guard + StartLinkedCommand parent side",
+      "Consider squashing Phase A commits before starting A.2 work"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "ServiceNodeId (not NodeId) — NodeId exists in restate_types for cluster nodes, renamed to EntityId",
+      "WAL serialization must remain backward compatible (Option<T> defaults to None)",
+      "All tables are logical (2-byte KeyKind prefix) within one RocksDB CF per partition",
+      "Phase A.2 prepares LinkCompletionSink::Invocation variant but Phase B uses it",
+      "AttachLinkCommand works without InvocationEdges — LinkedFrom on child's ServiceEdges only",
+      "ServiceEdgeState proto oneof: LinkedToActive/LinkedToCompleted/LinkedFrom — edge label derived from variant",
+      "Completed objects reject new invocations at inbox AND state mutations from in-flight handlers",
+      "GC cascade: no LinkedFrom parents + Completed → delete state/promises/status/edges + propagate UnlinkServiceRequest",
+      "Direct cycle detection only via get_service_linked_from prefix scan",
+      "Design docs (docs/design/) NOT committed to this branch"
+    ],
+    "decisions": [
+      "EntityId replaces ServiceNodeId — Object(ServiceId) + WorkflowInvocation(InvocationId), LinkHandle = EntityId alias",
+      "LinkedFrom IS the completion sink — stores LinkCompletionSink::Service(ServiceId, Option<CompletionHandler>) or Invocation(InvocationId, Option<CompletionId>)",
+      "LinkedTo simplified to Active/Completed with no fields — all callback data lives on LinkedFrom",
+      "LinkCompletionNotification { source: EntityId, result: ResponseResult, sink: LinkCompletionSink } — unified, replaces ServiceCompletionNotification",
+      "Two edge tables: ServiceEdges (VO parents, service-level) + InvocationEdges (WI parents, invocation-scoped)",
+      "Coupled semantics: StartLinkedCommand link failure rejects the invocation entirely",
+      "ServiceInvocationResponseSink::Link piggybacks LinkedFrom write on invoke path, NOT used for completion notification",
+      "AttachLinkCommand follows AttachInvocationCommand pattern — cross-partition, adds Invocation sink to child's LinkedFrom",
+      "VO parents use onCompleted handlers, WI parents await directly or block via Completing — both blocked from completing with active children",
+      "ServiceEdgeState uses proto oneof to unify edge label + state — no separate edge_label param on put_service_edge",
+      "LinkedFrom edges store a minimal ServiceEdgeState::LinkedFrom proto value (not empty bytes) to prevent deserialization errors",
+      "onCompleted handler encodes failure details as JSON in argument bytes",
+      "LinkServiceResponse carries remote_node_id so on_link_service_response can clean up stale LinkedTo edge on error",
+      "Unlink (not RemoveLink) as the verb for edge removal — UnlinkServiceCommand, UnlinkServiceRequest, ctx.unlink()",
+      "VirtualObjectStatus: Unlocked | Locked(InvocationId) | Completed(ResponseResult) — mutually exclusive, Completed is terminal",
+      "Vertical command slices for linked-services implementation — each command task covers its full stack (journal + proto + codec + outbox + WAL)",
+      "GC cascade: no parents + Completed → delete state/promises/status/edges + propagate UnlinkServiceRequest to children",
+      "Phase A ships independently from Phase B (invocation linking) — Phase A anchors only objects, Phase B adds WorkflowInvocation nodes"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "AttachLink without prior link — should child validate caller has a relationship (LinkedFrom exists)?",
+      "Multiple attaches from same WI — separate LinkedFrom records or error on duplicate?",
+      "Whether Phase A commits should be squashed before starting A.2",
+      "InvocationEdges cleanup on invocation free — timing and mechanism",
+      "handle.getOutput() for objects — how does a workflow await an object's completion result? Likely via AttachInvocation-like mechanism",
+      "Linking to already-completed child — should reject or immediately send LinkCompletionNotification?",
+      "Batch GC optimization — batching UnlinkServiceRequest per destination partition",
+      "Whether append_invocation Appended→Submitted response type change is a breaking API change",
+      "Whether WAL format version bump needed for adding Option<PartitionProcessorRpcRequestId> to command payloads",
+      "No timeout on partition processor RPCs — pre-existing concern surfaced during analysis"
+    ],
+    "risks": [
+      "Phase A refactors touch many files — ServiceNodeId → EntityId, LinkServiceResponse → LinkResponse, ServiceCompletionNotification → LinkCompletionNotification",
+      "end_invocation modification adds InvocationEdges scan on latency-critical path",
+      "InvocationStatus::Completing must be handled in all match arms across codebase"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/tasks/linked-services/specs/plan_phase_a2.md",
+      "docs/tasks/linked-services/specs/plan_phase_b.md",
+      "docs/tasks/linked-services/specs/tasks_phase_a2_b.md",
+      "docs/tasks/linked-services/task_context_phase_b.md",
+      "crates/types/src/invocation/mod.rs",
+      "crates/storage-api/src/service_edges_table/mod.rs",
+      "crates/worker/src/partition/state_machine/mod.rs",
+      "crates/worker/src/partition/state_machine/entries/link_service_command.rs",
+      "crates/worker/src/partition/state_machine/entries/complete_service_command.rs",
+      "crates/worker/src/partition/state_machine/entries/attach_invocation_command.rs"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "cargo check --all-targets",
+      "cargo nextest run -p restate-worker linked_services --all-features"
+    ]
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "4e16e132c"
+  }
+}

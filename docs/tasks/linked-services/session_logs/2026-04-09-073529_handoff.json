@@ -1,0 +1,77 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-09-073529",
+  "branch_name": "linked-services",
+  "task_name": "linked-services",
+  "session_number": 1,
+  "progress_update": {
+    "summary": "Designed a unified linking model from scratch through an extensive design conversation. Started on promise-objects branch fixing proto bugs, then evolved the entire linking architecture through collaborative design. Arrived at a clean model: objects and workflow invocations are the two node types, objects are the only anchors, four link combinations, ServiceEdges/InvocationEdges tables. Wrote and reviewed the design doc on a new linked-services branch forked from main.",
+    "goal": "Design and implement linked services: object-to-object linking with completion/GC (Phase A), then workflow invocation linking (Phase B). Objects as persistent anchors, workflow invocations as ephemeral unless anchored.",
+    "accomplished": [
+      "Fixed proto field numbers and LinkCommand message type ID (0x040F→0x0415) on promise-objects branch",
+      "Added command/notification type ID offset test to prevent future mismatches",
+      "Designed unified linking model through collaborative design session: two node types (Object/WorkflowInvocation), NodeId enum, four link combinations, one anchoring rule",
+      "Designed storage schema: evolve VirtualObjectStatus (add Completed), new ServiceEdges ('se') and InvocationEdges ('ie') tables, EdgeState enum on LinkedTo edges, LinkedFrom as presence-only",
+      "Designed complete message flow: LinkServiceCommand/Request/Response, CompleteServiceCommand, ServiceCompletionNotification, UnlinkServiceCommand/Request with GC cascade",
+      "Wrote comprehensive design doc at docs/design/linked_services.md covering Phase A (object linking) and Phase B (invocation linking)",
+      "Reviewed and addressed all plan review items: Completed+Locked conflict, cycle detection, proto type IDs, LinkedFrom value spec, invocation rejection"
+    ],
+    "now": "Design doc committed on linked-services branch. Ready for implementation planning and task breakdown for Phase A.",
+    "next_steps": [
+      "Create implementation plan and task breakdown for Phase A (object linking)",
+      "Implement ServiceEdges table (KeyKind, key schema, read/write traits, RocksDB implementation)",
+      "Add Completed(ResponseResult) to VirtualObjectStatus",
+      "Implement LinkServiceCommand, CompleteServiceCommand, UnlinkServiceCommand journal commands + proto + codec",
+      "Implement outbox messages and state machine handlers (on_link_service_request, on_service_completion_notification, on_unlink_service_request)",
+      "Tests: link establishment, object completion with onCompleted, state/invocation rejection, GC cascade"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "All tables are logical (2-byte KeyKind prefix) within one RocksDB CF per partition — no write amplification from multiple tables",
+      "NodeId enum (Object/WorkflowInvocation) used consistently across all messages for forward compatibility with Phase B",
+      "ServiceCompletionNotification and InvocationResponse are orthogonal — graph management vs result delivery",
+      "Completed objects reject new invocations entirely at the inbox",
+      "Direct cycle detection only (point read) — transitive cycles cause GC leak but not correctness issue",
+      "LinkedFrom edges are presence-only (empty value)",
+      "Proto type IDs assigned: LinkService=0x0415/0x8015, CompleteService=0x0416/0x8016, UnlinkService=0x0417"
+    ],
+    "decisions": [
+      "Two node types: NodeId::Object(ServiceId) and NodeId::WorkflowInvocation(ServiceId, InvocationUuid)",
+      "One anchoring rule: live objects are the only anchors",
+      "Edge labels: LinkedTo/LinkedFrom (not ParentOf/ChildOf)",
+      "VirtualObjectStatus: Unlocked | Locked(InvocationId) | Completed(ResponseResult) — three mutually exclusive states",
+      "Separate edge tables by local node type: ServiceEdges and InvocationEdges — table IS the discriminator",
+      "Use existing ServiceInvocation pathway for Phase B (option C) with linked marker, not a new outbox message",
+      "Unlink (not RemoveLink) as the verb for edge removal",
+      "Phase A (object linking) ships independently from Phase B (invocation linking)",
+      "New branch linked-services forked from main — clean implementation without promise-objects branch baggage"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Should workflow invocations get invocation-scoped KV state in addition to journal?",
+      "Batch GC optimization — batching UnlinkServiceRequest per destination partition",
+      "handle.getOutput() for objects — how does a workflow await an object's completion result? Likely via AttachInvocation-like mechanism"
+    ],
+    "risks": []
+  },
+  "working_set": {
+    "key_files": [
+      "docs/design/linked_services.md",
+      "crates/storage-api/src/service_status_table/mod.rs",
+      "crates/storage-api/src/outbox_table/mod.rs",
+      "crates/partition-store/src/partition_store.rs",
+      "crates/partition-store/src/keys.rs",
+      "crates/types/src/journal_v2/command.rs",
+      "crates/service-protocol-v4/src/message_codec/mod.rs",
+      "service-protocol/dev/restate/service/protocol.proto"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "git checkout -b linked-services main"
+    ]
+  },
+  "context": {
+    "wip_state": "clean",
+    "last_commit": "9b8ef9e85"
+  }
+}

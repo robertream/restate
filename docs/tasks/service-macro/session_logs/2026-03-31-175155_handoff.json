@@ -1,0 +1,82 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-03-31-175155",
+  "branch_name": "service-macro",
+  "task_name": "service-macro",
+  "session_number": 3,
+  "continuity": {
+    "started": "2026-03-31",
+    "sessions_reviewed": 2,
+    "arc_goal": "Produce a focused, internally consistent RFC suite for State Graph and Links — core RFC covers linked workflows with clear resolved decisions, extracted RFCs handle orthogonal concerns (content-addressable graphs, state migration, introspection). Success = each RFC stands alone with clear scope, no ambiguity on core model, all plan review findings addressed."
+  },
+  "progress_update": {
+    "summary": "We reviewed the State Graph and Links RFC end-to-end with a critical eye, then executed a major restructuring. Extracted three standalone RFCs (Content-Addressable Frozen Graphs, onUpgrade State Migration, State Introspection with Object Links). Moved shared ownership and bidirectional links to the future design ideas doc. Tightened the core State Graph RFC to focus exclusively on linked workflows with clear resolved decisions on all previously-open semantic questions.",
+    "goal": "Produce a focused, internally consistent RFC suite for State Graph and Links — the core RFC covers linked workflows only, with separate RFCs for orthogonal concerns. Success = each RFC stands alone with clear scope, no ambiguity on the core model, and the plan review findings are fully addressed.",
+    "accomplished": [
+      "Plan review of State Graph RFC — identified 9 simplification opportunities and semantic gaps",
+      "Created standalone RFC: Content-Addressable Frozen Graphs (Merkle Trees) — extracted from core RFC",
+      "Created standalone RFC: onUpgrade State Migration — extracted from core RFC",
+      "Created standalone RFC: State Introspection with Object Links — merged object linking into ego graph RFC, documented existing SSE POC implementation in detail",
+      "Moved Shared Ownership (ref-counted GC) and Bidirectional Links to future_design_ideas_033126.md (sections 11-12)",
+      "Rewrote State Graph RFC: scoped to linked workflows only, unidirectional links, single ownership, 11 resolved decisions, 6 open questions"
+    ],
+    "now": "Just completed all restructuring. The RFC suite is in a solid state with all plan review findings addressed.",
+    "next_steps": [
+      "Wire protocol / journal entry specification for links (semantics are now stable enough)",
+      "Cross-partition link design sketch (deferred but acknowledged as common case for cross-service links)",
+      "Consider exclusive shared handlers on workflows as an RFC addition or separate RFC",
+      "Implementation planning for link storage in partition store"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "Focus on semantics first, implementation details later",
+      "State Graph RFC stands alone — scoped to linked workflows only",
+      "Object links live in the State Introspection RFC",
+      "Failure propagation strategies deferred to future RFC",
+      "Tiered storage for frozen graphs deferred",
+      "Cross-partition links deferred"
+    ],
+    "decisions": [
+      "Links are unidirectional (parent→child only) — back-links deferred to future design ideas",
+      "Single ownership model — no ref-counted GC, spawner owns the link",
+      "removeLink orphans the child (continues running independently, GC'd by own timeout) — parent must explicitly cancel if desired",
+      "Returning state not observable through links — link stays 'running' until full completion",
+      "Completion handler failures logged but ignored — developer's responsibility",
+      "Object links merged into State Introspection RFC — lightweight, no lifecycle semantics, purely for ego graph inclusion",
+      "Merkle trees, onUpgrade, and state introspection each get their own RFC",
+      "Workflow completion requires all linked children to complete recursively (returning→completed lifecycle)",
+      "Result is not observable until full completion (not on return, on completion)",
+      "Child failure does NOT kill parent — link status updates, parent continues",
+      "Graph curation is load-bearing — unlinked children don't block completion",
+      "Exclusive shared handlers on workflows (Option A: queued, run when run is suspended) is the decided path for interactive workflows"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "Should workflows have a default timeout or is no-timeout the default?",
+      "Link storage model: same column family as state or separate?",
+      "Orphan GC policy: what is the default timeout for orphaned workflows?",
+      "Object link storage: share with workflow links or lighter-weight mechanism?",
+      "Circular object links: prevent or just handle via depth limits?"
+    ],
+    "risks": [
+      "Cross-partition links are deferred but most cross-service links will be cross-partition — this is the common case"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "docs/rfcs/rfc_state_graph_and_links_033126.md",
+      "docs/rfcs/rfc_content_addressable_graphs_033126.md",
+      "docs/rfcs/rfc_on_upgrade_state_migration_033126.md",
+      "docs/rfcs/rfc_state_introspection_033126.md",
+      "docs/design/future_design_ideas_033126.md",
+      "crates/ingress-http/src/state_router.rs",
+      "crates/ingress-http/src/handler/objects.rs"
+    ],
+    "active_ids": [],
+    "recent_commands": []
+  },
+  "context": {
+    "wip_state": "uncommitted",
+    "last_commit": "b1766c03b"
+  }
+}

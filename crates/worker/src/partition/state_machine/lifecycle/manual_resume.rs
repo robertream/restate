@@ -77,7 +77,7 @@ where
             InvocationStatus::Scheduled(_) | InvocationStatus::Inboxed(_) => {
                 ctx.reply_to_resume_invocation(response_sink, ResumeInvocationResponse::NotStarted);
             }
-            InvocationStatus::Completed(_) => {
+            InvocationStatus::Completing(_) | InvocationStatus::Completed(_) => {
                 ctx.reply_to_resume_invocation(response_sink, ResumeInvocationResponse::Completed);
             }
             InvocationStatus::Free => {

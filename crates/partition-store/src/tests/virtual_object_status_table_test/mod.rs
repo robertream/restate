@@ -19,13 +19,13 @@ const FIXTURE_INVOCATION: InvocationUuid = InvocationUuid::from_u128(12345678900
 fn populate_data<T: WriteVirtualObjectStatusTable>(txn: &mut T) {
     txn.put_virtual_object_status(
         &ServiceId::with_partition_key(1337, "svc-1", "key-1"),
-        &VirtualObjectStatus::Locked(InvocationId::from_parts(1337, FIXTURE_INVOCATION)),
+        &VirtualObjectStatus::locked(InvocationId::from_parts(1337, FIXTURE_INVOCATION)),
     )
     .expect("");
 
     txn.put_virtual_object_status(
         &ServiceId::with_partition_key(1337, "svc-1", "key-2"),
-        &VirtualObjectStatus::Locked(InvocationId::from_parts(1337, FIXTURE_INVOCATION)),
+        &VirtualObjectStatus::locked(InvocationId::from_parts(1337, FIXTURE_INVOCATION)),
     )
     .expect("");
 }
@@ -38,7 +38,7 @@ async fn verify_point_lookups<T: ReadVirtualObjectStatusTable>(txn: &mut T) {
 
     assert_eq!(
         status,
-        VirtualObjectStatus::Locked(InvocationId::from_parts(1337, FIXTURE_INVOCATION))
+        VirtualObjectStatus::locked(InvocationId::from_parts(1337, FIXTURE_INVOCATION))
     );
 }
 

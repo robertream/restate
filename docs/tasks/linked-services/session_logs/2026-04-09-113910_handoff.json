@@ -1,0 +1,94 @@
+{
+  "version": "1.1",
+  "timestamp": "2026-04-09-113910",
+  "branch_name": "linked-services",
+  "task_name": "linked-services",
+  "session_number": 5,
+  "continuity": {
+    "started": "2026-04-08",
+    "sessions_reviewed": 4,
+    "arc_goal": "Implement linked services Phase A: object-to-object linking with completion, onCompleted handlers, GC cascade, and state/invocation rejection on completed objects."
+  },
+  "progress_update": {
+    "summary": "Implemented all of Phase A linked services on the linked-services branch. Four waves executed: storage foundation, command stacks (3 vertical slices), state machine handlers, and integration tests. Code review found and fixed 3 issues: cycle detection crash (LinkedFrom empty value deserialization), external state mutation bypass on completed objects, and onCompleted handler losing failure info. Refactored EdgeState → ServiceEdgeState with proto oneof unifying edge label and state into LinkedToActive/LinkedToCompleted/LinkedFrom variants. Removed docs/design/linked_services.md from git history (design docs not committed). 9 clean commits, 6/6 tests passing.",
+    "goal": "Implement linked services Phase A: object-to-object linking with completion, onCompleted handlers, GC cascade, and state/invocation rejection on completed objects.",
+    "accomplished": [
+      "Implemented full Phase A: ServiceEdges table, ServiceNodeId, VirtualObjectStatus::Completed, LinkServiceCommand, CompleteServiceCommand, UnlinkServiceCommand — all with journal types, proto, codec, outbox messages, WAL dispatch, state machine handlers",
+      "6 integration tests: link establishment (happy + self-link rejection), object completion (happy + double rejection + state/invocation rejection), unlink + GC cascade with grandchild (happy + non-completed no-GC)",
+      "Fixed 3 code review findings: cycle detection crash (C1), external state mutation bypass (I1), onCompleted failure encoding (I2)",
+      "Refactored ServiceEdgeState to proto oneof with LinkedToActive/LinkedToCompleted/LinkedFrom — edge label derived from variant, no separate u8 param",
+      "Fixed LinkServiceResponse to carry remote_node_id for stale edge cleanup on error"
+    ],
+    "now": "Phase A implementation complete. All code review findings addressed. 9 commits on linked-services branch, 6/6 tests passing. Design doc removed from git history.",
+    "next_steps": [
+      "E2E testing requires SDK-side implementation (sdk-shared-core + Rust SDK) for LinkServiceCommandMessage, CompleteServiceCommandMessage, UnlinkServiceCommandMessage",
+      "Phase B: InvocationEdges table, StartLinkedCommand, workflow invocation linking — builds on Phase A",
+      "Consider squashing the 9 commits before PR",
+      "Run full test suite (cargo nextest run --all-features) to verify no regressions"
+    ],
+    "confidence": "high",
+    "constraints": [
+      "ServiceNodeId (not NodeId) — NodeId already exists in restate_types for cluster nodes",
+      "ServiceEdgeState proto oneof: LinkedToActive/LinkedToCompleted/LinkedFrom — edge label derived from variant",
+      "Proto type IDs: LinkService=0x0415/0x8015, CompleteService=0x0416/0x8016, UnlinkService=0x0417",
+      "Completed objects reject new invocations at inbox AND state mutations from in-flight handlers",
+      "GC cascade: no LinkedFrom parents + Completed → delete state/promises/status/edges + propagate UnlinkServiceRequest",
+      "Direct cycle detection only via get_service_linked_from prefix scan",
+      "Design docs (docs/design/) NOT committed to this branch",
+      "All tables are logical (2-byte KeyKind prefix) within one RocksDB CF per partition",
+      "WAL serialization must remain backward compatible (Option<T> defaults to None)",
+      "ServiceCompletionNotification and InvocationResponse are orthogonal — graph management vs result delivery"
+    ],
+    "decisions": [
+      "ServiceEdgeState uses proto oneof to unify edge label + state — no separate edge_label param on put_service_edge",
+      "LinkedFrom edges store a minimal ServiceEdgeState::LinkedFrom proto value (not empty bytes) to prevent deserialization errors",
+      "onCompleted handler encodes failure details as JSON in argument bytes",
+      "LinkServiceResponse carries remote_node_id so on_link_service_response can clean up stale LinkedTo edge on error",
+      "Unlink (not RemoveLink) as the verb for edge removal — UnlinkServiceCommand, UnlinkServiceRequest, ctx.unlink()",
+      "VirtualObjectStatus: Unlocked | Locked(InvocationId) | Completed(ResponseResult) — mutually exclusive, Completed is terminal",
+      "Vertical command slices for linked-services implementation — each command task covers its full stack (journal + proto + codec + outbox + WAL)",
+      "GC cascade: no parents + Completed → delete state/promises/status/edges + propagate UnlinkServiceRequest to children",
+      "Phase A ships independently from Phase B (invocation linking) — Phase A anchors only objects, Phase B adds WorkflowInvocation nodes"
+    ],
+    "blockers": [],
+    "open_questions": [
+      "handle.getOutput() for objects — how does a workflow await an object's completion result? Likely via AttachInvocation-like mechanism",
+      "Linking to already-completed child — should reject or immediately send ServiceCompletionNotification?",
+      "Batch GC optimization — batching UnlinkServiceRequest per destination partition",
+      "Whether append_invocation Appended→Submitted response type change is a breaking API change",
+      "Whether WAL format version bump needed for adding Option<PartitionProcessorRpcRequestId> to command payloads",
+      "No timeout on partition processor RPCs — pre-existing concern surfaced during analysis"
+    ],
+    "risks": [
+      "Adding request_id to NotifySignalRequest changes WAL serialization — needs careful backward compatibility testing"
+    ]
+  },
+  "working_set": {
+    "key_files": [
+      "crates/storage-api/src/service_edges_table/mod.rs",
+      "crates/partition-store/src/service_edges_table/mod.rs",
+      "crates/storage-api/src/service_status_table/mod.rs",
+      "crates/storage-api/src/protobuf_types.rs",
+      "crates/storage-api/proto/dev/restate/storage/v1/domain.proto",
+      "crates/types/src/invocation/mod.rs",
+      "crates/types/src/journal_v2/command.rs",
+      "crates/service-protocol-v4/src/entry_codec.rs",
+      "crates/service-protocol-v4/src/message_codec/mod.rs",
+      "service-protocol/dev/restate/service/protocol.proto",
+      "crates/worker/src/partition/state_machine/entries/link_service_command.rs",
+      "crates/worker/src/partition/state_machine/entries/complete_service_command.rs",
+      "crates/worker/src/partition/state_machine/entries/unlink_service_command.rs",
+      "crates/worker/src/partition/state_machine/mod.rs",
+      "crates/worker/src/partition/state_machine/tests/linked_services.rs"
+    ],
+    "active_ids": [],
+    "recent_commands": [
+      "cargo check --all-targets",
+      "cargo nextest run -p restate-worker linked_services --all-features"
+    ]
+  },
+  "context": {
+    "wip_state": "clean",
+    "last_commit": "4e16e132c"
+  }
+}

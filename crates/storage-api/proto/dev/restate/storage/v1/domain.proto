@@ -200,6 +200,8 @@ message InvocationStatusV2 {
     SUSPENDED = 4;
     COMPLETED = 5;
     PAUSED = 7;
+    // Workflow run handler returned while linked children are still active.
+    COMPLETING = 8;
   }
 
   Status status = 1;
@@ -261,6 +263,12 @@ message InvocationStatusV2 {
   optional bytes vqueue_id = 34;
   // If empty, no limit was set
   string limit_key = 35;
+
+  // Number of linked parents (LinkedFrom edges) referencing this invocation.
+  uint32 linked_from_count = 36;
+
+  // Number of active LinkedTo children this invocation has linked to.
+  uint32 linked_to_count = 37;
 }
 
 
@@ -325,9 +333,33 @@ message InvocationStatusV2Lazy {
 }
 
 message VirtualObjectStatus {
-  message Locked { InvocationId invocation_id = 1; }
+  message Locked {
+    InvocationId invocation_id = 1;
+    repeated ServiceInvocationResponseSink response_sinks = 2;
+    uint32 linked_from_count = 3;
+  }
+  message Completed {
+    ResponseResult result = 1;
+    uint32 linked_from_count = 2;
+  }
+  message Unlocked {
+    repeated ServiceInvocationResponseSink response_sinks = 1;
+    uint32 linked_from_count = 2;
+  }
 
-  oneof status { Locked locked = 1; }
+  oneof status {
+    Locked locked = 1;
+    Completed completed = 2;
+    Unlocked unlocked = 3;
+  }
+}
+
+message ServiceCompletionTarget {
+  ServiceId service_id = 1;
+  bytes handler_name = 2;
+  // Retention inherited from the linking parent — applied to spawned handler invocations.
+  Duration completion_retention_duration = 3;
+  Duration journal_retention_duration = 4;
 }
 
 message ServiceInvocationResponseSink {
@@ -348,10 +380,22 @@ message ServiceInvocationResponseSink {
 
   message None {}
 
+  message ServiceLinkNotification {
+    ServiceId linked_from = 1;
+  }
+
+  message InvocationLinkNotification {
+    bytes linked_from = 1;
+  }
+
   oneof response_sink {
     None none = 1;
     PartitionProcessor partition_processor = 2;
     Ingress ingress = 3;
+    // field 4 (Link) was deleted — reserved to avoid proto reuse confusion
+    ServiceCompletionTarget service_completion = 5;
+    ServiceLinkNotification service_link_notification = 6;
+    InvocationLinkNotification invocation_link_notification = 7;
   }
 }
 
@@ -405,6 +449,11 @@ message ServiceInvocation {
   // "level1" or "level1/level2" which requires parsing on read. Check whether a dedicated
   // Protobuf message would be faster to serialize/deserialize.
   string limit_key = 15;
+  // Parent entity for StartLinkedCommand piggyback link establishment.
+  optional EntityId link_from = 16;
+  // Completion id for routing LinkResponse back to the parent's journal entry.
+  // Set by StartLinkedCommand only when link_from is set.
+  optional uint32 link_caller_completion_id = 17;
 }
 
 message StateMutation {
@@ -614,6 +663,19 @@ message Entry {
     ATTACH_INVOCATION_COMPLETION = 30;
     GET_INVOCATION_OUTPUT_COMPLETION = 31;
     COMPLETE_AWAKEABLE_COMMAND = 33;
+    LINK_SERVICE_COMMAND = 34;
+    LINK_SERVICE_COMPLETION = 35;
+    UNLINK_SERVICE_COMMAND = 36;
+    UNLINK_SERVICE_COMPLETION = 50;
+    UNLINK_INVOCATION_COMMAND = 51;
+    UNLINK_INVOCATION_COMPLETION = 52;
+    COMPLETE_SERVICE_COMMAND = 37;
+    COMPLETE_SERVICE_COMPLETION = 38;
+    START_LINKED_COMMAND = 39;
+    START_LINKED_COMPLETION = 40;
+    // 41 and 42 were ATTACH_LINK_COMMAND / ATTACH_LINK_COMPLETION — removed
+    ATTACH_SERVICE_COMMAND = 43;
+    ATTACH_SERVICE_COMPLETION = 44;
   }
 
   EntryType ty = 3;
@@ -710,6 +772,62 @@ message OutboxMessage {
     }
   }
 
+  // Sent from link_from partition to link_to VO: establish link + optional ServiceCompletion sink.
+  message LinkRequest {
+    // Fields 6, 7 previously held retention durations — moved onto ServiceCompletionTarget.
+    reserved 6, 7;
+
+    EntityId link_to = 1;        // entity being linked to (routes to its partition)
+    EntityId link_from = 2;      // entity establishing the link
+    InvocationId caller_invocation_id = 3;
+    uint32 caller_completion_id = 4;
+    // Optional onCompleted handler sink. Some only for VO link_from with result_completion_handler.
+    // Retention for the spawned handler is carried on the sink itself.
+    optional ServiceCompletionTarget handler_sink = 5;
+  }
+
+  // Link confirmed or rejected. On success, handle = linked_to.
+  message LinkResponse {
+    message Failure {
+      uint32 error_code = 1;
+      string message = 2;
+    }
+
+    EntityId linked_from = 1;    // entity that established the link (routes to its partition)
+    EntityId linked_to = 2;      // linked-to entity — IS the handle on success
+    uint32 completion_id = 3;
+    // If absent, result is Ok(())
+    optional Failure failure = 4;
+    InvocationId caller_invocation_id = 5;
+  }
+
+  message UnlinkRequest {
+    EntityId linked_to = 1;      // entity that was linked to (routes to its partition)
+    EntityId linked_from = 2;    // entity that established the link
+    InvocationId caller_invocation_id = 3;
+    // Optional: None means GC cascade (no response expected)
+    optional uint32 caller_completion_id = 4;
+  }
+
+  message UnlinkResponse {
+    message Failure {
+      uint32 error_code = 1;
+      string message = 2;
+    }
+
+    EntityId linked_from = 1;    // entity that established the link (routes to its partition)
+    InvocationId caller_invocation_id = 2;
+    uint32 completion_id = 3;
+    // If absent, result is Ok(())
+    optional Failure failure = 4;
+  }
+
+  message AttachServiceRequest {
+    InvocationId caller_id = 1;
+    uint32 completion_id = 2;
+    ServiceId target = 3;
+  }
+
   oneof outbox_message {
     OutboxServiceInvocation service_invocation_case = 1;
     OutboxServiceInvocationResponse service_invocation_response = 2;
@@ -717,6 +835,12 @@ message OutboxMessage {
     OutboxCancel cancel = 5;
     AttachInvocationRequest attach_invocation_request = 6;
     NotifySignal notify_signal = 7;
+    UnlinkRequest unlink_request = 8;
+    LinkRequest link_request = 9;
+    LinkResponse link_response = 10;
+    LinkCompletionNotification link_completion_notification = 11;
+    AttachServiceRequest attach_service_request = 12;
+    UnlinkResponse unlink_response = 13;
   }
 }
 
@@ -798,5 +922,44 @@ message Promise {
   oneof state {
     CompletedState completed_state = 1;
     NotCompletedState not_completed_state = 2;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Linked Services (Phase A / A.2)
+// ---------------------------------------------------------------------
+
+// Identifies a node in the linked-services graph.
+// Phase A: Object only. WorkflowInvocation variant added in Phase A.2 (used in Phase B).
+message EntityId {
+  oneof node {
+    ServiceId object = 1;
+    InvocationId workflow_invocation = 2;
+  }
+}
+
+// Graph-only notification: triggers edge transition + Completing resume check on linked_from side.
+// Completion callbacks are dispatched independently via the linked_to entity's response_sinks.
+message LinkCompletionNotification {
+  EntityId linked_from = 1;   // entity that established the link (routes to its partition)
+  EntityId linked_to = 2;     // linked-to entity that completed
+}
+
+// Value stored for an edge in the ServiceEdges or InvocationEdges table.
+// The oneof determines the edge label and state. Only LinkedTo variants are actively produced;
+// LinkedFrom is retained for wire compatibility with old persisted data.
+message ServiceEdgeState {
+  // LinkedTo(Active) — child is active.
+  message LinkedToActive {}
+  // LinkedTo(Completed) — child has completed.
+  message LinkedToCompleted {}
+  // LinkedFrom — deprecated/removed. Parent tracking now uses linked_from_count + link notification sinks.
+  // Kept for wire compatibility — old data may still reference field 3.
+  message LinkedFrom {}
+
+  oneof label {
+    LinkedToActive linked_to_active = 1;
+    LinkedToCompleted linked_to_completed = 2;
+    LinkedFrom linked_from = 3;
   }
 }

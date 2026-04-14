@@ -49,7 +49,8 @@ fn put_virtual_object_status<S: StorageAccess>(
     status: &VirtualObjectStatus,
 ) -> Result<()> {
     let key = write_status_key(service_id);
-    if *status == VirtualObjectStatus::Unlocked {
+    if matches!(status, VirtualObjectStatus::Unlocked { response_sinks, .. } if response_sinks.is_empty())
+    {
         storage.delete_key(&key)
     } else {
         storage.put_kv_proto(key, status)
@@ -65,7 +66,7 @@ fn get_virtual_object_status<S: StorageAccess>(
 
     storage
         .get_value_proto(key)
-        .map(|value| value.unwrap_or(VirtualObjectStatus::Unlocked))
+        .map(|value| value.unwrap_or_default())
 }
 
 fn delete_virtual_object_status<S: StorageAccess>(

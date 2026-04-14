@@ -442,6 +442,7 @@ fn decode_key(key: &[u8]) -> (String, Option<String>, Option<KeyKind>) {
         KeyKind::Lock => LockKey::deserialize_from(&mut cursor)
             .ok()
             .map(|k| format!("{k:?}")),
+        KeyKind::ServiceEdges | KeyKind::InvocationEdges => None,
     };
 
     (kind_name, decoded, Some(key_kind))

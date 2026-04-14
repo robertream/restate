@@ -491,6 +491,70 @@ fn build_segments(key: &[u8]) -> Vec<Segment> {
                 }
             }
         }
+        KeyKind::ServiceEdges => {
+            // service_name (var) + service_key (var) + edge_label (1) + remote_type (1) + remote_key (var)
+            let var_end =
+                parse_variable_fields(&key[10..], &mut segments, &["service_name", "service_key"]);
+            if var_end > 0 {
+                let pos = 10 + var_end;
+                if pos + 2 <= key.len() {
+                    segments.push(Segment {
+                        kind: KeySegment::FixedField,
+                        start: pos,
+                        len: 1,
+                        label: "edge_label",
+                    });
+                    segments.push(Segment {
+                        kind: KeySegment::FixedField,
+                        start: pos + 1,
+                        len: 1,
+                        label: "remote_type",
+                    });
+                }
+                if pos + 2 < key.len() {
+                    segments.push(Segment {
+                        kind: KeySegment::VariableField,
+                        start: pos + 2,
+                        len: key.len() - (pos + 2),
+                        label: "remote_key",
+                    });
+                }
+            }
+        }
+        KeyKind::InvocationEdges => {
+            // invocation_uuid (16 bytes) + edge_label (1) + remote_type (1) + remote_key (var)
+            if remaining >= 16 {
+                segments.push(Segment {
+                    kind: KeySegment::FixedField,
+                    start: 10,
+                    len: 16,
+                    label: "invocation_uuid",
+                });
+                let pos = 26;
+                if pos + 2 <= key.len() {
+                    segments.push(Segment {
+                        kind: KeySegment::FixedField,
+                        start: pos,
+                        len: 1,
+                        label: "edge_label",
+                    });
+                    segments.push(Segment {
+                        kind: KeySegment::FixedField,
+                        start: pos + 1,
+                        len: 1,
+                        label: "remote_type",
+                    });
+                }
+                if pos + 2 < key.len() {
+                    segments.push(Segment {
+                        kind: KeySegment::VariableField,
+                        start: pos + 2,
+                        len: key.len() - (pos + 2),
+                        label: "remote_key",
+                    });
+                }
+            }
+        }
     }
 
     segments
