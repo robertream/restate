@@ -8,10 +8,10 @@ export default defineConfig({
     fs: { allow: [path.resolve(__dirname)] },
     proxy: {
       "/restate": {
-        target: "http://localhost:8180",
+        target: "http://localhost:8080",
         changeOrigin: true,
       },
-      "/AgentSwarm": { target: "http://localhost:8180", changeOrigin: true },
+      "/AgentSwarm": { target: "http://localhost:8080", changeOrigin: true },
     },
   },
   resolve: {

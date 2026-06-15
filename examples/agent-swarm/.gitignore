@@ -3,3 +3,4 @@ dist/
 models/
 *.gguf
 test-results/
+.vite/
