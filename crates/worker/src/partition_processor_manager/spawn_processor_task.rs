@@ -18,7 +18,9 @@ use tracing::{debug, info, instrument, warn};
 
 use restate_bifrost::Bifrost;
 use restate_core::network::{ShardSender, TransportConnect};
-use restate_core::{RuntimeTaskHandle, TaskCenter, TaskKind, cancellation_token, cancellation_watcher};
+use restate_core::{
+    RuntimeTaskHandle, TaskCenter, TaskKind, cancellation_token, cancellation_watcher,
+};
 use restate_ingestion_client::IngestionClient;
 use restate_ingress_http::StateRouter;
 use restate_partition_store::{PartitionStoreManager, SubscriptionRequest};

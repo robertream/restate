@@ -332,7 +332,7 @@ mod tests {
             .await;
 
         let router = StateRouter::default();
-        let service_id = ServiceId::new("counter", "my-counter");
+        let service_id = ServiceId::new(None, "counter", "my-counter");
 
         let partition_id = Metadata::with_current(|m| {
             m.partition_table_ref()
@@ -444,7 +444,7 @@ mod tests {
             .await;
 
         let router = StateRouter::default();
-        let service_id = ServiceId::new("counter", "gap-counter");
+        let service_id = ServiceId::new(None, "counter", "gap-counter");
 
         let partition_id = Metadata::with_current(|m| {
             m.partition_table_ref()
@@ -525,7 +525,7 @@ mod tests {
             .await;
 
         let router = StateRouter::default();
-        let service_id = ServiceId::new("counter", "multi-key");
+        let service_id = ServiceId::new(None, "counter", "multi-key");
 
         // Seed an Active entry at revision 5
         let mut initial_state = HashMap::new();

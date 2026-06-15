@@ -153,10 +153,7 @@ where
                     .await
                     .map(|resp| resp.map(axum::body::Body::new)),
                 RequestType::Output(invocation_id) => this
-                    .handle_invocation_get_output(
-                        req,
-                        InvocationQuery::Invocation(invocation_id),
-                    )
+                    .handle_invocation_get_output(req, InvocationQuery::Invocation(invocation_id))
                     .await
                     .map(|resp| resp.map(axum::body::Body::new)),
                 RequestType::AttachByTarget => this

@@ -377,13 +377,11 @@ where
                         WorkflowRequestType::from_path_chunks(segments)?,
                     )),
                     "objects" => {
-                        let service =
-                            segments.next().ok_or(HandlerError::NotFound)?.to_owned();
-                        let key = urlencoding::decode(
-                            segments.next().ok_or(HandlerError::NotFound)?,
-                        )
-                        .map_err(HandlerError::UrlDecodingError)?
-                        .into_owned();
+                        let service = segments.next().ok_or(HandlerError::NotFound)?.to_owned();
+                        let key =
+                            urlencoding::decode(segments.next().ok_or(HandlerError::NotFound)?)
+                                .map_err(HandlerError::UrlDecodingError)?
+                                .into_owned();
                         match segments.next().ok_or(HandlerError::NotFound)? {
                             "state" if segments.next().is_none() => {
                                 Ok(RequestType::ObjectState(ObjectStateRequestType {

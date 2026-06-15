@@ -16,7 +16,7 @@ use tracing::debug;
 use restate_storage_api::StorageError;
 use restate_types::sharding::PartitionKey;
 
-use crate::keys::{EncodeTableKeyPrefix, KeyKind};
+use crate::keys::{DecodeTableKey, EncodeTableKeyPrefix, KeyKind};
 use crate::scan::{PhysicalScan, TableScan};
 use crate::state_table::StateKey;
 
@@ -51,7 +51,19 @@ pub fn migrate_to_scoped_state_table(ctx: &mut MigrationContext<'_>) -> Result<(
 
     while iterator.valid() {
         // safe to unwrap because the iterator is valid
-        let (mut key, value) = iterator.item().unwrap();
+        let (raw_key, value) = iterator.item().unwrap();
+
+        // Skip internal keys (e.g. revision tracking keys with \x00 prefix in
+        // the state_key). These are managed separately and should not be migrated
+        // into the scoped state table.
+        if let Ok(decoded) = StateKey::deserialize_from(&mut &*raw_key) {
+            if decoded.state_key.starts_with(b"\x00") {
+                iterator.next();
+                continue;
+            }
+        }
+
+        let mut key = raw_key;
         // Advance past the legacy `KeyKind::State` prefix and the partition_key.
         // The remaining bytes are the wire-identical suffix
         // (service_name | service_key | state_key) shared with `ScopedStateKey`.

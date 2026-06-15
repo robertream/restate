@@ -29,9 +29,9 @@ use tower_http::normalize_path::NormalizePathLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{Span, debug, info, info_span, instrument};
 
+use crate::state_router::StateRouter;
 use restate_core::network::hyper_error_status;
 use restate_core::{TaskCenter, TaskKind, cancellation_watcher};
-use crate::state_router::StateRouter;
 use restate_types::config::IngressOptions;
 use restate_types::errors::GenericError;
 use restate_types::health::HealthStatus;

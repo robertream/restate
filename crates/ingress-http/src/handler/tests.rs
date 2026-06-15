@@ -1221,7 +1221,7 @@ async fn handle_with_size_limit<B>(
     mut req: Request<B>,
     size_limit: usize,
     dispatcher: MockRequestDispatcher,
-) -> Response<LimitResponseBody<Full<Bytes>>>
+) -> Response<LimitResponseBody<axum::body::Body>>
 where
     B: http_body::Body + Send + 'static,
     <B as http_body::Body>::Data: Send + Sync + 'static,
@@ -1238,6 +1238,7 @@ where
         .service(Handler::new(
             Live::from_value(mock_schemas()),
             Arc::new(dispatcher),
+            None,
         ));
 
     svc.oneshot(req).await.unwrap()

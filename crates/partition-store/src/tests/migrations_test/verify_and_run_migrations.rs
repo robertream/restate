@@ -86,7 +86,14 @@ fn count_legacy_state(store: &crate::PartitionStore) -> usize {
     it.seek_to_first();
     let mut n = 0;
     while it.valid() {
-        n += 1;
+        // Skip internal keys (e.g. revision tracking keys starting with \x00)
+        if let Some(mut key) = it.key() {
+            if let Ok(decoded) = StateKey::deserialize_from(&mut key) {
+                if !decoded.state_key.starts_with(b"\x00") {
+                    n += 1;
+                }
+            }
+        }
         it.next();
     }
     n

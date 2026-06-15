@@ -187,9 +187,12 @@ async fn test_state_change_events_via_mpsc() {
     ));
 
     // Commit a put — expect a Patch event.
-    let mut txn = store.transaction();
-    txn.put_user_state(&service_id, b"k1", b"v1").unwrap();
-    txn.commit().await.expect("commit should not fail");
+    {
+        let mut txn = store.transaction();
+        txn.put_user_state(&service_id, &Bytes::from_static(b"k1"), b"v1")
+            .unwrap();
+        txn.commit().await.expect("commit should not fail");
+    }
 
     let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
         .await
@@ -202,9 +205,11 @@ async fn test_state_change_events_via_mpsc() {
     ));
 
     // Commit a delete_all — expect a ClearAll event.
-    let mut txn = store.transaction();
-    txn.delete_all_user_state(&service_id).unwrap();
-    txn.commit().await.expect("commit should not fail");
+    {
+        let mut txn = store.transaction();
+        txn.delete_all_user_state(&service_id).unwrap();
+        txn.commit().await.expect("commit should not fail");
+    }
 
     let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
         .await
@@ -227,13 +232,17 @@ async fn test_resubscribe_revision_mismatch() {
     // Commit 5 transactions to drive the revision to 5.
     for i in 0u8..5 {
         let mut txn = store.transaction();
-        txn.put_user_state(&service_id, b"k1", [i]).unwrap();
+        txn.put_user_state(&service_id, &Bytes::from_static(b"k1"), [i])
+            .unwrap();
         txn.commit().await.expect("commit should not fail");
     }
     // Commit one more transaction with a second key; revision becomes 6.
-    let mut txn = store.transaction();
-    txn.put_user_state(&service_id, b"k2", b"v2").unwrap();
-    txn.commit().await.expect("commit should not fail");
+    {
+        let mut txn = store.transaction();
+        txn.put_user_state(&service_id, &Bytes::from_static(b"k2"), b"v2")
+            .unwrap();
+        txn.commit().await.expect("commit should not fail");
+    }
     // Revision is now 6; state: k1=4, k2=v2.
 
     // Take the receiver before subscribing so we capture all events.

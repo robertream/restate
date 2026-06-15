@@ -99,10 +99,20 @@ async fn migrate_to_scoped_state_table_moves_unscoped_state_to_scoped_table() {
         ))
         .expect("scan should start");
     unscoped_iter.seek_to_first();
-    assert!(
-        !unscoped_iter.valid(),
-        "legacy unscoped state rows should have been deleted"
-    );
+    // Only user state entries should have been deleted; internal keys
+    // (e.g. revision tracking, starting with \x00) may remain.
+    while unscoped_iter.valid() {
+        if let Some(mut key) = unscoped_iter.key() {
+            if let Ok(decoded) = StateKey::deserialize_from(&mut key) {
+                assert!(
+                    decoded.state_key.starts_with(b"\x00"),
+                    "legacy unscoped user state rows should have been deleted, found: {:?}",
+                    decoded.state_key,
+                );
+            }
+        }
+        unscoped_iter.next();
+    }
     unscoped_iter
         .status()
         .expect("unscoped scan should not error");
